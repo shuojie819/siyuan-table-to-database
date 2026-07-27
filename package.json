@@ -1,0 +1,15 @@
+{
+  "name": "siyuan-table-to-database",
+  "version": "1.2.3",
+  "description": "Convert a SiYuan table block into an Attribute View (database) block.",
+  "scripts": {
+    "build": "webpack --mode production",
+    "dev": "webpack --mode development --watch"
+  },
+  "devDependencies": {
+    "siyuan": "latest",
+    "webpack": "^5.95.0",
+    "webpack-cli": "^5.1.4",
+    "copy-webpack-plugin": "^12.0.2"
+  }
+}

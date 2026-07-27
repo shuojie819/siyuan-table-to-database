@@ -1,0 +1,22 @@
+{
+  "name": "siyuan-table-to-database",
+  "author": "ShuoJie",
+  "url": "https://github.com/shuojie819/siyuan-table-to-database",
+  "version": "1.2.3",
+  "minAppVersion": "3.0.0",
+  "backends": ["all"],
+  "frontends": ["desktop", "browser-desktop", "mobile", "browser-mobile"],
+  "displayName": {
+    "default": "Table to Database",
+    "zh_CN": "表格转数据库"
+  },
+  "description": {
+    "default": "Convert SiYuan tables into Attribute View databases, or import CSV / Markdown tables into new or existing databases.",
+    "zh_CN": "一键把思源表格转换为属性视图（数据库），也支持从 CSV / Markdown 表格导入到新数据库或已有数据库。"
+  },
+  "readme": {
+    "default": "README.md",
+    "zh_CN": "README_zh_CN.md"
+  },
+  "keywords": ["表格", "数据库", "属性视图", "table", "database", "attribute view"]
+}
