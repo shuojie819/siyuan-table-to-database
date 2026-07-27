@@ -583,15 +583,32 @@ export default class TableToDatabase extends Plugin {
   // 点击顶栏按钮后焦点转移到菜单，但缓存仍保留上次编辑的 protyle，导入时据此定位正确文档。
   registerProtyleFocusTracking() {
     // 编辑器内任意可聚焦元素（块/标题/内容区）获得焦点都会冒泡到 document 的 focusin
-    document.addEventListener("focusin", (e) => {
+    // 处理函数存到实例上（this._onFocusIn），便于 onunload() 时精准 removeEventListener。
+    this._onFocusIn = (e) => {
       const node = e.target;
       if (!node || !node.closest) return;
       const protyle = node.closest(".protyle");
       if (protyle) setLastFocusedProtyle(protyle);
-    });
+    };
+    document.addEventListener("focusin", this._onFocusIn);
     // 用户在已聚焦的 protyle 内移动光标时，刷新「当前选中块」缓存，使「光标位置」更精准。
-    document.addEventListener("selectionchange", () => {
+    // 处理函数同样存到实例上（this._onSelectionChange），与 addEventListener 时传入的是同一引用。
+    this._onSelectionChange = () => {
       refreshAnchorBlockFromSelection();
-    });
+    };
+    document.addEventListener("selectionchange", this._onSelectionChange);
+  }
+
+  // 插件禁用 / 卸载时移除全局监听，避免禁用后仍在运行、工作台仍在输出。
+  // 必须传入与 addEventListener 时完全相同的处理函数引用（即 this._onFocusIn / this._onSelectionChange）。
+  onunload() {
+    if (this._onFocusIn) {
+      document.removeEventListener("focusin", this._onFocusIn);
+      this._onFocusIn = null;
+    }
+    if (this._onSelectionChange) {
+      document.removeEventListener("selectionchange", this._onSelectionChange);
+      this._onSelectionChange = null;
+    }
   }
 }

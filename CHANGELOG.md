@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.2.9] - 2026-07-28
+
+### Fix: 插件禁用后仍运行 / 工作台仍在输出 (issue #1)
+
+- **根因**：插件类 `TableToDatabase` 原本**没有 `onunload()`**，且在 `registerProtyleFocusTracking()`
+  中向全局 `document` 注册了两个**匿名**监听器（`focusin`、`selectionchange`）且从未移除。SiYuan
+  禁用插件时调用 `onunload()`（当时不存在），于是这两个全局监听原封不动地留在 `document` 上——
+  用户之后任何一次聚焦/编辑文档都会继续触发，表现为「禁用后还在运行」；而 `setLastFocusedProtyle`
+  内的 `console.log("[table-to-database] 缓存最后聚焦 protyle…")` 每次 focusin 都会继续打印，即
+  「工作台还在输出」。
+- **修复（仅改 `src/index.js`，不碰业务逻辑/锚点算法/`common.js` 日志）**：
+  1. 两个监听器改为存到实例的具名 handler：`this._onFocusIn` 与 `this._onSelectionChange`，
+     注册时传入这两个引用（不再匿名，使后续可精准移除）；
+  2. 新增 `onunload()`，在其中 `removeEventListener("focusin", this._onFocusIn)` 与
+     `removeEventListener("selectionchange", this._onSelectionChange)`，并置 `null`。
+- **可移除性已证明**：add 与 remove 传入的是同一 `this._onFocusIn` / `this._onSelectionChange`
+  实例属性（同一对象引用），`removeEventListener` 必然生效。全仓复扫确认无 `setInterval` /
+  `window.addEventListener` / 持久 `MutationObserver` / 其它未清理的全局资源（ImportWizard 内的
+  局部一次性 `setTimeout` 属正常流程、无需清理）。
+- **验收闭环**：无头环境无法跑真实 SiYuan，建议在 SiYuan 桌面端实测——启用后禁用，再聚焦任意文档，
+  观察 DevTools 控制台是否仍打印「缓存最后聚焦 protyle」日志；若无该日志，即证明修复生效。
+
 ## [1.2.8] - 2026-07-24
 
 ### Fix: mSelect/select 整行去重大小写敏感导致二次导入误判新增 (bugfix)
