@@ -9,7 +9,7 @@
  *   - computeIncremental：根据去重策略计算 新增/重复/未匹配 计数
  * ============================================================ */
 
-import { buildSelectOptions, buildMSelectOptions, buildRowKey } from "../common";
+import { buildSelectOptions, buildMSelectOptions, buildRowKey, canonRawCell, canonValueCell } from "../common";
 import { reapplyHeader } from "./parsers";
 
 // 按列类型构造选项（select / mSelect）

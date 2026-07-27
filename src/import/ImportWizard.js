@@ -61,6 +61,7 @@ const CSS = `
 .iw-preview th { background:var(--b3-theme-background); position:sticky; top:0; }
 .iw-preview tr.iw-dup td { color:#bbb; text-decoration:line-through; }
 .b3-chip { display:inline-block; padding:0 6px; border-radius:10px; background:var(--b3-theme-primary-lightest, rgba(127,127,127,.12)); font-size:11px; margin:1px 2px; }
+    .b3-chip--primary { display:inline-block; padding:1px 8px; border-radius:10px; background:#e3f2fd; border:1px solid #90caf9; color:#1565c0; font-size:11px; font-weight:600; margin:1px 2px; }
 .iw-stat { background:var(--b3-theme-background); border:1px solid var(--b3-border-color); border-radius:8px; padding:12px; margin-bottom:12px; }
 .iw-stat .iw-num { font-size:20px; font-weight:700; color:var(--b3-theme-primary); }
 .iw-radio { display:block; margin:6px 0; }
@@ -326,7 +327,29 @@ export class ImportWizard {
 
   // 右侧预览（通用）。dupMode: null | "row" | "row-dedup"
   renderPreview(p, existing, dupMode) {
-    const head = `<tr>${p.columns.map((c) => `<th>${escapeHtml(c.rawName)}</th>`).join("")}</tr>`;
+    // 计算「主列/主键」对应的源列下标，用于在表头渲染主列 chip：
+    // - 旧库模式（existing 存在，step3b）：在 existing.columns 中找到 type==="block" 的目标列，
+    //   再遍历 matchMap（源列 index -> 目标 keyID）找出匹配的源列下标。
+    // - 新库模式（existing 为 null，step3a）：直接用 p.primaryIndex。
+    let primarySrcIndex;
+    if (existing) {
+      const primaryTarget = existing.columns.find((c) => c.type === "block");
+      primarySrcIndex = -1;
+      if (primaryTarget) {
+        for (const [srcIdx, keyID] of this.matchMap.entries()) {
+          if (keyID && keyID === primaryTarget.keyID) { primarySrcIndex = srcIdx; break; }
+        }
+      }
+    } else {
+      primarySrcIndex = p.primaryIndex;
+    }
+    const head = `<tr>${p.columns.map((c) => {
+      // 主列标题：用 .b3-chip.b3-chip--primary 高亮渲染；普通列保持普通文本。
+      const name = c.index === primarySrcIndex
+        ? `<span class="b3-chip b3-chip--primary">${escapeHtml(c.rawName)}</span>`
+        : escapeHtml(c.rawName);
+      return `<th>${name}</th>`;
+    }).join("")}</tr>`;
     const total = p.rows.length;
     const maxRows = Math.min(this.previewLimit, total);
     const rowsHtml = [];
@@ -364,6 +387,7 @@ export class ImportWizard {
 
   previewValue(v, type) {
     const s = v == null ? "" : String(v);
+    if (s === "" && type !== "checkbox") return '<span style="color:#bbb;">—</span>';
     switch (type) {
       case "checkbox": {
         const checked = ["true", "✓", "✔", "☑", "是", "1", "yes", "y"].includes(s.toLowerCase().trim());
@@ -375,6 +399,9 @@ export class ImportWizard {
         const parts = s.split(MSELECT_SPLIT_RE).map((x) => x.trim()).filter(Boolean);
         return parts.map((p) => `<span class="b3-chip">${escapeHtml(p)}</span>`).join(" ");
       }
+      case "block":
+        // 主键（标题）列：源 CSV 里的普通文本 → 显示文本 chip
+        return s ? `<span class="b3-chip b3-chip--primary">${escapeHtml(s)}</span>` : "";
       case "date": {
         const ms = parseFlexibleDateToMs(s);
         const txt = isNaN(ms) ? s : new Date(ms).toLocaleDateString();
@@ -383,7 +410,8 @@ export class ImportWizard {
       case "url":
         return s ? `<a href="${escapeHtml(s)}" target="_blank" rel="noopener">${escapeHtml(s)}</a>` : "";
       default:
-        return escapeHtml(s);
+        // 文本/数字等普通类型不再 chip 化，直接显示为普通文本（撤销上版过度 chip 化）
+        return s ? escapeHtml(s) : "";
     }
   }
 

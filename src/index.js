@@ -101,18 +101,39 @@ function openFieldTypePanel(tableBlock) {
     let previewLimit = 10;
     const renderPreview = (container) => {
       const previewData = parsed.dataRows.slice(0, previewLimit);
-      const headerCells = parsed.header.map((h, i) =>
-        `<th style="padding:4px 10px;border-bottom:1px solid var(--b3-border-color);text-align:left;white-space:nowrap;${i === primaryIndex ? "font-weight:600;background:var(--b3-theme-surface);" : ""}">${escapeHtml(h)}</th>`
-      ).join("");
+      const headerCells = parsed.header.map((h, i) => {
+        // 主列（标题列）：用 .b3-chip.b3-chip--primary 高亮渲染标题 chip；
+        // 普通列保持普通文本，不额外加 chip。
+        const name = i === primaryIndex
+          ? `<span class="b3-chip b3-chip--primary">${escapeHtml(h)}</span>`
+          : escapeHtml(h);
+        return `<th style="padding:4px 10px;border-bottom:1px solid var(--b3-border-color);text-align:left;white-space:nowrap;${i === primaryIndex ? "font-weight:600;background:var(--b3-theme-surface);" : ""}">${name}</th>`;
+      }).join("");
       const renderCell = (v, colIdx) => {
         if (v === "") return '<span style="color:#bbb;">—</span>';
-        if (colDefs[colIdx].selectedType === "mSelect") {
+        const sel = colDefs[colIdx].selectedType;
+        if (sel === "mSelect") {
           const parts = v.split(MSELECT_SPLIT_RE).map((x) => x.trim()).filter(Boolean);
           return parts.map((p) => `<span class="b3-chip">${escapeHtml(p)}</span>`).join(" ");
         }
-        if (colDefs[colIdx].selectedType === "url") {
+        if (sel === "select") {
+          return `<span class="b3-chip">${escapeHtml(v)}</span>`;
+        }
+        if (sel === "block") {
+          // 主键（标题）列：源 CSV 里就是普通 cell 文本 → 显示文本 chip
+          return `<span class="b3-chip b3-chip--primary">${escapeHtml(v)}</span>`;
+        }
+        if (sel === "url") {
           return `<a href="${escapeHtml(v)}" target="_blank" rel="noopener noreferrer" style="color:var(--b3-theme-primary,#4285f4);text-decoration:underline">${escapeHtml(v)}</a>`;
         }
+        if (sel === "date") {
+          return `<span class="b3-chip b3-chip--primary">${escapeHtml(v)}</span>`;
+        }
+        if (sel === "checkbox") {
+          const checked = ["true", "✓", "✔", "☑", "是", "1", "yes", "y"].includes(v.toLowerCase().trim());
+          return `<span style="color:${checked ? "var(--b3-theme-primary)" : "var(--b3-theme-on-surface)"}">${checked ? "✓" : "✗"}</span>`;
+        }
+        // 文本/数字等普通类型不再 chip 化，直接显示为普通文本（撤销上版过度 chip 化）
         return escapeHtml(v);
       };
       const previewBodyRows = previewData.map((row) =>
@@ -153,6 +174,7 @@ function openFieldTypePanel(tableBlock) {
     // 左右两栏各自 overflow:auto，整体 max-height:70vh；外层 flex 左 3 / 右 7 不变。
     const html = `<style>
       .b3-chip { display:inline-block;padding:0 6px;border-radius:10px;background:var(--b3-theme-primary-lightest,rgba(127,127,127,.12));font-size:11px;margin:1px 2px; }
+      .b3-chip--primary { display:inline-block;padding:1px 8px;border-radius:10px;background:#e3f2fd;border:1px solid #90caf9;color:#1565c0;font-size:11px;font-weight:600;margin:1px 2px; }
     </style>
     <div class="b3-dialog__body" style="padding:16px;height:100%;overflow:hidden;display:flex;flex-direction:column;">
         <div style="margin-bottom:12px;flex:0 0 auto;">
@@ -231,6 +253,8 @@ function openFieldTypePanel(tableBlock) {
           sel.onchange = (e) => {
             const idx = Number(sel.getAttribute("data-field"));
             if (colDefs[idx]) colDefs[idx].selectedType = sel.value;
+            // 类型变了 → 重渲染右侧数据预览（对齐导入向导的实时渲染行为）。
+            render();
           };
         });
         fieldContainer.querySelectorAll('[data-set-primary]').forEach((btn) => {

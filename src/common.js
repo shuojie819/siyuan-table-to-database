@@ -189,7 +189,7 @@ function normalizeMulti(parts) {
     const k = s.toLowerCase();
     if (seen.has(k)) return;
     seen.add(k);
-    out.push(s);
+    out.push(k);
   });
   // 稳定排序（含中文），保证 "A,B" 与 "B,A" 得到相同 key
   out.sort((a, b) => a.localeCompare(b, "zh-Hans-CN"));
@@ -198,23 +198,52 @@ function normalizeMulti(parts) {
 
 const CHECK_TRUE = new Set(["true", "✓", "✔", "☑", "是", "1", "yes", "y"]);
 
+// 统一 mSelect 分词：先按空白拆字，再按标点拆标签组，
+// 两端（canonRawCell 源侧、canonValueCell 目标侧）都走完全相同的算法路径，
+// 消除任何因切分顺序不对称导致的去重漏匹配。
+function tokenizeMselect(text) {
+  if (text == null) return [];
+  const s = String(text);
+  if (!s) return [];
+  // 第一层：按空白拆（覆盖空格分隔的多标签，如 "AI Agent 知识库"）
+  const words = s.split(/\s+/);
+  // 第二层：每个 word 再按标点拆（覆盖 ,;/| 等分隔的多标签）
+  const out = [];
+  for (const w of words) {
+    if (!w) continue;
+    for (const frag of w.split(MSELECT_SEP_RE)) {
+      const t = frag.trim();
+      if (t) out.push(t);
+    }
+  }
+  return out;
+}
+
+// 判定一个 mSelect / select token 是否「有意义」：含至少一个字母 / 数字 / 中日韩汉字。
+// 纯符号或纯标点的 token（如单独的 "+"、"·"、"*"、连续标点）没有语义，SiYuan 内核在
+// 创建选项（mSelect / select）时通常会**静默丢弃**这类名称为纯符号的选项（不报错，仅丢弃）。
+//
+// 这正是 v1.2.6 修复的「仅含分隔符的 mSelect 备注行二次导入被误判新增」根因：
+// 源侧 canonRawCell 把 `硅谷 AI 实验室；Hermes 系列开源大模型 + Hermes Agent 开源自主智能体`
+// 拆成 8 个 token（含单独的 "+"），但内核写入 AV 时把 "+" 选项丢弃，目标库该行备注列只剩 7 个 token；
+// 于是「源 row key」含 "+"、「目标 row key」不含 "+" → 整行 key 不一致 → 误判为新增。
+// 其它 89 行的备注要么为空、要么是单个不含分隔符的词，源/目标都只有 0~1 个 token，对得上 → 判重复。
+//
+// 修复：源侧(canonRawCell)与目标侧(canonValueCell)的 mSelect 归一化都按同一规则丢弃这类
+// 纯符号 token，使「写(源 key)」与「读(目标 key)」对 mSelect 始终一致——无论内核是否丢弃该选项。
+// 注意：只用于 mSelect（及 select 目标侧），不影响 text/url/number/date/checkbox 等列。
+function isMeaningfulToken(t) {
+  return /[0-9A-Za-z\u4e00-\u9fff]/.test(t);
+}
+
 // 源侧（原始字符串 + 目标列类型）→ 规范文本
 export function canonRawCell(raw, type) {
   if (raw == null) return "";
   switch (type) {
-    case "mSelect": {
-      // 两层切分：先按全体分隔符（不含 \s）拆标签组，再按 \s 二次切字词，
-      // 扁平化后去重排序。保证 "A；B C" 与 "A B C" 两种写法能 match。
-      const firstSplit = String(raw).split(MSELECT_SEP_RE);
-      const flattened = [];
-      firstSplit.forEach((frag) => {
-        const subParts = frag.split(/\s+/).map((s) => s.trim()).filter(Boolean);
-        flattened.push(...subParts);
-      });
-      return normalizeMulti(flattened);
-    }
+    case "mSelect":
+      return normalizeMulti(tokenizeMselect(raw).filter(isMeaningfulToken));
     case "select":
-      return String(raw).trim();
+      return String(raw).trim().toLowerCase();
     case "checkbox":
       return CHECK_TRUE.has(String(raw).trim().toLowerCase()) ? "1" : "0";
     case "date": {
@@ -233,8 +262,81 @@ export function canonRawCell(raw, type) {
   }
 }
 
+// 从单个 select / mSelect 选项节点抽取可显示文本内容。
+//
+// SiYuan AV JSON 中 multi-select / select 选项节点的形态在不同内核版本 / 写入路径下并不统一。
+// 之前整行去重把「备注列=多选」全部误判为新增，根因正是：本函数只读 `m.content` 字符串，
+// 而 SiYuan 实际存储可能是仅含 id 的引用（需反查 keyOptions）、嵌套对象、text/value 字段，
+// 或 content 为数组——这些情况下 `m.content` 为空/缺失，导致目标侧该列 token 集合为空，
+// 行哈希与源 row 不一致，整行去重失效（文本列因 text.content 始终有值而正常）。
+//
+// 这里兼容所有可能形态，确保「目标库读取」与「源 CSV 单元格」归一到同一 token 集合：
+//   - 标准：{ content: "文本" }
+//   - 嵌套对象：{ content: { content: "文本" } } / { content: { text: "文本" } }
+//   - text 字段：{ text: "文本" } / { text: { content: "文本" } }
+//   - value 字段：{ value: "文本" } / { value: { content: "文本" } }
+//   - content 为数组（罕见）：逐元素抽取后拼接
+//   - 仅存引用 id：{ id: "opt-xxx" } → 结合该列 keyOptions 反查 name/content
+//   - 节点本身就是字符串 / 数字
+//
+// @param {*} m 单个选项节点
+// @param {Array<{id?:string,name?:string,content?:string}>} [opts] 该列的 keyOptions（用于 id 反查）
+// @returns {string}
+function extractMselectItemContent(m, opts) {
+  if (m == null) return "";
+  if (typeof m === "string") return m;
+  if (typeof m === "number") return String(m);
+
+  // 1) 节点本身是 { id } 引用 → 反查 keyOptions 取 name/content
+  if (m.id != null) {
+    const hit = (opts || []).find((o) => o && (o.id === m.id || String(o.id) === String(m.id)));
+    if (hit) {
+      const name = hit.name != null ? hit.name : hit.content;
+      if (name != null && String(name).trim() !== "") return String(name);
+    }
+  }
+
+  // 2) content 字段（最常见）
+  if (m.content != null) {
+    if (typeof m.content === "string") {
+      if (m.content.trim() !== "") return m.content;
+    } else if (Array.isArray(m.content)) {
+      // content 为数组：逐元素抽取后空格拼接，再交给 tokenizeMselect 归一
+      return m.content
+        .map((x) => extractMselectItemContent(x, opts))
+        .filter(Boolean)
+        .join(" ");
+    } else if (typeof m.content === "object") {
+      const inner =
+        m.content.content != null ? m.content.content
+        : m.content.text != null ? m.content.text
+        : m.content.value != null ? m.content.value
+        : "";
+      if (inner != null && String(inner).trim() !== "") return String(inner);
+    } else {
+      // number / 其它原始类型
+      return String(m.content);
+    }
+  }
+
+  // 3) text 字段形态
+  if (m.text != null) {
+    if (typeof m.text === "string") return m.text;
+    if (typeof m.text === "object" && m.text.content != null) return String(m.text.content);
+  }
+
+  // 4) value 字段形态
+  if (m.value != null) {
+    if (typeof m.value === "string") return m.value;
+    if (typeof m.value === "object" && m.value.content != null) return String(m.value.content);
+  }
+
+  return "";
+}
+
 // 目标侧（SiYuan Value 结构 + 类型）→ 规范文本（与 canonRawCell 同源规则）
-export function canonValueCell(v, type) {
+// options: 该列 keyOptions（仅 mSelect/select 需要，用于 id 反查文本）
+export function canonValueCell(v, type, options) {
   if (!v) return "";
   switch (type) {
     case "block": {
@@ -266,21 +368,20 @@ export function canonValueCell(v, type) {
     case "checkbox":
       return (v.checkbox && v.checkbox.checked) ? "1" : "0";
     case "select":
-      return normalizeMulti((v.mSelect || []).map((m) => (m && m.content != null ? m.content : "")));
+      // 单选：单元格本质也是 mSelect 结构（SiYuan 统一用 mSelect 承载 select/mSelect）。
+      // 用 extractMselectItemContent 兼容所有形态，并与源侧 canonRawCell(select) 同源规则。
+      return normalizeMulti((v.mSelect || []).map((m) => extractMselectItemContent(m, options)));
     case "mSelect": {
-      // 与 canonRawCell 对齐：对每个已存标签 content 做两层切分再扁平化，
-      // 保证源侧与目标侧得到完全一致的 sort+join 结果。
+      // 与 canonRawCell 对齐：每个已存标签 content 也走 tokenizeMselect，并丢弃纯符号 token。
+      // 即使 SiYuan 实际存储把同一项内容拆得更细（或更粗）、或仅存 id 引用，
+      // extractMselectItemContent 都能抽回文本，再 tokenizeMselect 归一到同一 token 集合。
+      // 丢弃纯符号 token 是 v1.2.6 修复「+ 等符号被内核静默丢弃导致二次导入整行误判新增」的关键：
+      // 源侧同样丢弃，保证「源 row key」与「目标 row key」在备注列始终一致。
       const allParts = [];
       (v.mSelect || []).forEach((m) => {
-        const content = (m && m.content != null) ? String(m.content).trim() : "";
-        if (!content) return;
-        const firstSplit = content.split(MSELECT_SEP_RE);
-        firstSplit.forEach((frag) => {
-          const subParts = frag.split(/\s+/).map((s) => s.trim()).filter(Boolean);
-          allParts.push(...subParts);
-        });
+        allParts.push(...tokenizeMselect(extractMselectItemContent(m, options)));
       });
-      return normalizeMulti(allParts);
+      return normalizeMulti(allParts.filter(isMeaningfulToken));
     }
     default:
       return "";
@@ -517,18 +618,22 @@ export function buildCell(field, rawValue) {
         opts.find((o) => o.name.toLowerCase() === name.toLowerCase());
 
       if (field.type === "mSelect") {
-        // 按分隔符 + 空格切分为多个独立标签，去重并保持原顺序。
-        // 使用 MSELECT_SPLIT_RE（含 \s）——写库时宽松拆分，源 CSV 列里空格分隔
-        // 的多标签会被正确切为多个 item 写入 SiYuan 数据库。
-        const parts = v.split(MSELECT_SPLIT_RE).map((s) => s.trim()).filter(Boolean);
+        // 与 canonRawCell 源侧归一化共用同一套 tokenizeMselect 分词规则，
+        // 保证「写库拆出的标签集合」与「去重源 key 的标签集合」完全一致
+        // （写路径与读路径对 mSelect「是否拆分、按什么规则拆分」达成一致，见 v1.2.6）。
+        // 注意：此处保留所有 token（含纯符号如 "+"）写入 AV——SiYuan 内核会自行决定是否
+        // 丢弃纯符号选项；去重用的 canonRawCell / canonValueCell 两侧同步丢弃此类 token，
+        // 因此无论内核是否丢弃，源 key 与目标 key 在备注列都保持一致。
+        const parts = tokenizeMselect(v);
         const seenP = new Set();
         const arr = [];
         parts.forEach((p) => {
           const key = p.toLowerCase();
           if (seenP.has(key)) return;
           seenP.add(key);
-          const o = findOpt(p) || { name: p, color: "1" };
-          arr.push({ content: o.name, color: o.color || "1" });
+          const o = findOpt(p);
+          // 选项是否带 id 完全交由 SiYuan 内核决定；此处只产出 {content,color}（与 1.2.3 一致）。
+          arr.push({ content: o ? o.name : p, color: (o && o.color) || "1" });
         });
         return { ...base, mSelect: arr };
       }
