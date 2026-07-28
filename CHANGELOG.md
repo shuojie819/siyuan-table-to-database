@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.2.10] - 2026-07-28
+
+### Fix: 集市 Release 资源被覆盖导致索引更新失败 (bazaar issue #1968)
+
+- **背景**：v1.2.9 发布后，将新的 `package.zip` 上传/替换到了同一个 v1.2.9 Release 资源中（asset id 发生
+  变化），但 Release tag 仍指向同一 commit。SiYuan 集市（bazaar）自动检查不通过，要求每次更新必须对应
+  新的 Release tag 与新的 manifest version，不能覆盖旧 Release 的资源。
+- **处理（无代码变更）**：
+  1. 将 `plugin.json` 与 `package.json` 的 `version` 从 1.2.9 提升至 1.2.10；
+  2. 重新打包 `package.zip` / `siyuan-table-to-database.zip`，内含 v1.2.10 清单；
+  3. 后续需在 GitHub 新建 tag `v1.2.10` 的 Release，并将新包上传至该 Release，标记为 Latest。
+  旧 v1.2.9 Release 不再改动。v1.2.9 中 issue #1 的修复内容保持不变。
+
 ## [1.2.9] - 2026-07-28
 
 ### Fix: 插件禁用后仍运行 / 工作台仍在输出 (issue #1)
