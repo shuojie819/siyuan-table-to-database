@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.2.11] - 2026-07-28
+
+### Chore: 更新 preview.png 预览图并升版
+
+- 替换 `preview.png` 预览图（用户更新）；
+- `plugin.json` / `package.json` 的 `version` 从 1.2.10 提升至 1.2.11；
+- 重新构建并打包 `package.zip` / `siyuan-table-to-database.zip`（8 个标准条目，不含 `package.json`）；
+- 无代码逻辑变更，issue #1 的修复内容保持不变。
+
 ## [1.2.10] - 2026-07-28
 
 ### Fix: 集市 Release 资源被覆盖导致索引更新失败 (bazaar issue #1968)

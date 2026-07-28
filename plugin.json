@@ -2,7 +2,7 @@
   "name": "siyuan-table-to-database",
   "author": "ShuoJie",
   "url": "https://github.com/shuojie819/siyuan-table-to-database",
-  "version": "1.2.10",
+  "version": "1.2.11",
   "minAppVersion": "3.0.0",
   "backends": ["all"],
   "frontends": ["desktop", "browser-desktop", "mobile", "browser-mobile"],
