@@ -198,23 +198,37 @@ function normalizeMulti(parts) {
 
 const CHECK_TRUE = new Set(["true", "✓", "✔", "☑", "是", "1", "yes", "y"]);
 
-// 统一 mSelect 分词：先按空白拆字，再按标点拆标签组，
-// 两端（canonRawCell 源侧、canonValueCell 目标侧）都走完全相同的算法路径，
-// 消除任何因切分顺序不对称导致的去重漏匹配。
-function tokenizeMselect(text) {
+// 统一 mSelect 分词。
+// **v1.3.1 修复**：新增 isCSV 参数，区分「CSV 导入」与「Markdown 导入 / 表格转数据库等转换」：
+//   - isCSV=true（CSV 导入）：先按空白拆字，再按标点拆标签组
+//     （覆盖 "AI Agent 知识库" 这类空格分隔的多标签，与历史行为一致）；
+//   - isCSV=false（非 CSV 的导入 / 转换）：仅按逗号类分隔符(，;；|、)切，**不按空格切**——
+//     用户要求「仅在 CSV 导入时按空格切」，其余方式把整段（含空格）视为单个标签。
+// 两端（canonRawCell 源侧、canonValueCell 目标侧、buildCell 写库）共用同一套规则与同一 isCSV，
+// 消除任何因切分顺序 / 规则不对称导致的去重漏匹配或写入不一致。
+export function tokenizeMselect(text, isCSV = false) {
   if (text == null) return [];
   const s = String(text);
   if (!s) return [];
-  // 第一层：按空白拆（覆盖空格分隔的多标签，如 "AI Agent 知识库"）
-  const words = s.split(/\s+/);
-  // 第二层：每个 word 再按标点拆（覆盖 ,;/| 等分隔的多标签）
-  const out = [];
-  for (const w of words) {
-    if (!w) continue;
-    for (const frag of w.split(MSELECT_SEP_RE)) {
-      const t = frag.trim();
-      if (t) out.push(t);
+  if (isCSV) {
+    // 第一层：按空白拆（覆盖空格分隔的多标签，如 "AI Agent 知识库"）
+    const words = s.split(/\s+/);
+    // 第二层：每个 word 再按标点拆（覆盖 ,;/| 等分隔的多标签）
+    const out = [];
+    for (const w of words) {
+      if (!w) continue;
+      for (const frag of w.split(MSELECT_SEP_RE)) {
+        const t = frag.trim();
+        if (t) out.push(t);
+      }
     }
+    return out;
+  }
+  // 非 CSV：仅按逗号类分隔符拆，不按空格拆（v1.3.1）
+  const out = [];
+  for (const frag of s.split(MSELECT_SEP_RE)) {
+    const t = frag.trim();
+    if (t) out.push(t);
   }
   return out;
 }
@@ -237,11 +251,12 @@ function isMeaningfulToken(t) {
 }
 
 // 源侧（原始字符串 + 目标列类型）→ 规范文本
-export function canonRawCell(raw, type) {
+// isCSV：透传自导入/转换入口，决定 mSelect 是否按空格切分（见 tokenizeMselect）。
+export function canonRawCell(raw, type, isCSV = false) {
   if (raw == null) return "";
   switch (type) {
     case "mSelect":
-      return normalizeMulti(tokenizeMselect(raw).filter(isMeaningfulToken));
+      return normalizeMulti(tokenizeMselect(raw, isCSV).filter(isMeaningfulToken));
     case "select":
       return String(raw).trim().toLowerCase();
     case "checkbox":
@@ -336,7 +351,8 @@ function extractMselectItemContent(m, opts) {
 
 // 目标侧（SiYuan Value 结构 + 类型）→ 规范文本（与 canonRawCell 同源规则）
 // options: 该列 keyOptions（仅 mSelect/select 需要，用于 id 反查文本）
-export function canonValueCell(v, type, options) {
+// isCSV：透传自导入/转换入口，决定 mSelect 是否按空格切分（见 tokenizeMselect）。
+export function canonValueCell(v, type, options, isCSV = false) {
   if (!v) return "";
   switch (type) {
     case "block": {
@@ -379,7 +395,7 @@ export function canonValueCell(v, type, options) {
       // 源侧同样丢弃，保证「源 row key」与「目标 row key」在备注列始终一致。
       const allParts = [];
       (v.mSelect || []).forEach((m) => {
-        allParts.push(...tokenizeMselect(extractMselectItemContent(m, options)));
+        allParts.push(...tokenizeMselect(extractMselectItemContent(m, options), isCSV));
       });
       return normalizeMulti(allParts.filter(isMeaningfulToken));
     }
@@ -392,11 +408,12 @@ export function canonValueCell(v, type, options) {
 // existing: ExistingAV（含 columns，顺序与 av JSON keyValues 一致）；
 // targetToSrc: { [keyID]: srcIndex }（列匹配结果）。
 // 列顺序与目标库 rowHashes 完全一致，确保「源行 key」与「目标行 key」可直接比较。
-export function buildRowKey(row, existing, targetToSrc) {
+// isCSV：透传自导入入口，决定 mSelect 是否按空格切分（与目标库 readAV 的 rowHashes 保持同一规则）。
+export function buildRowKey(row, existing, targetToSrc, isCSV = false) {
   const parts = (existing.columns || []).map((col) => {
     const srcIdx = targetToSrc[col.keyID];
     const raw = (srcIdx != null && row[srcIdx] != null) ? row[srcIdx] : null;
-    return canonRawCell(raw, col.type);
+    return canonRawCell(raw, col.type, isCSV);
   });
   return parts.join("\u0001");
 }
@@ -561,13 +578,16 @@ export function buildSelectOptions(colValues) {
 }
 
 // 生成多选选项（按分隔符拆分后去重）
-export function buildMSelectOptions(colValues) {
+// isCSV=true：按「逗号类分隔符 + 空白」拆（MSELECT_SPLIT_RE）；
+// isCSV=false：仅按逗号类分隔符拆（不按空格），与 buildCell 写入 / canon 去重保持同一规则（v1.3.1）。
+export function buildMSelectOptions(colValues, isCSV = false) {
   const seen = new Set();
   const opts = [];
+  const splitter = isCSV ? MSELECT_SPLIT_RE : MSELECT_SEP_RE;
   colValues.forEach((raw) => {
     const v = raw == null ? "" : String(raw).trim();
     if (v === "") return;
-    v.split(MSELECT_SPLIT_RE).map((s) => s.trim()).filter(Boolean).forEach((part) => {
+    v.split(splitter).map((s) => s.trim()).filter(Boolean).forEach((part) => {
       const key = part.toLowerCase();
       if (seen.has(key)) return;
       seen.add(key);
@@ -580,7 +600,8 @@ export function buildMSelectOptions(colValues) {
 // ---------- 单元格值构造（严格对齐 SiYuan Value 结构） ----------
 
 // field: { keyID, type, options? }  rawValue: 原始单元格文本
-export function buildCell(field, rawValue) {
+// isCSV：透传自导入/转换入口，决定 mSelect 是否按空格切分（见 tokenizeMselect）。
+export function buildCell(field, rawValue, isCSV = false) {
   const v = (rawValue == null ? "" : String(rawValue)).trim();
   const base = { keyID: field.keyID, type: field.type };
 
@@ -624,7 +645,7 @@ export function buildCell(field, rawValue) {
         // 注意：此处保留所有 token（含纯符号如 "+"）写入 AV——SiYuan 内核会自行决定是否
         // 丢弃纯符号选项；去重用的 canonRawCell / canonValueCell 两侧同步丢弃此类 token，
         // 因此无论内核是否丢弃，源 key 与目标 key 在备注列都保持一致。
-        const parts = tokenizeMselect(v);
+        const parts = tokenizeMselect(v, isCSV);
         const seenP = new Set();
         const arr = [];
         parts.forEach((p) => {
@@ -803,7 +824,7 @@ export async function writeNewDatabase(cfg) {
     const rowValues = [];
     rowValues.push({ keyID: primaryKeyID, type: "block", block: { content: primaryVal } });
     cellFields.forEach((def) => {
-      rowValues.push(buildCell(def, r[def.colIndex]));
+      rowValues.push(buildCell(def, r[def.colIndex], cfg.isCSV));
     });
     blocksValues.push(rowValues);
   }

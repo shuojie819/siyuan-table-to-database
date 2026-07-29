@@ -139,13 +139,15 @@ export function buildParsedTable(allRows, source, rawName, firstRowAsHeader, emp
     return rr;
   });
 
+  // mSelect 选项拆分规则：CSV 源按「逗号类 + 空白」拆，其它源仅按逗号类拆（不按空格，v1.3.1）
+  const isCSV = source === "csv";
   const columns = Array.from({ length: maxCols }, (_, i) => {
     const colVals = paddedRows.map((r) => (r[i] != null ? r[i] : ""));
     const type = inferType(colVals);
     const options = type === "select"
       ? buildSelectOptions(colVals)
       : type === "mSelect"
-        ? buildMSelectOptions(colVals)
+        ? buildMSelectOptions(colVals, isCSV)
         : [];
     return { index: i, rawName: colNames[i] != null ? colNames[i] : `列${i + 1}`, type, options };
   });

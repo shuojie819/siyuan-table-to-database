@@ -45,6 +45,7 @@ export async function writeNewDb(parsed, fields, opts = {}) {
     insertAfterId: opts.insertAfterId,
     rootID,
     onProgress: opts.onProgress,
+    isCSV: opts.isCSV,
   });
 
   return { ...res, avID };

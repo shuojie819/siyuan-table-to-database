@@ -13,9 +13,10 @@ import { buildSelectOptions, buildMSelectOptions, buildRowKey, canonRawCell, can
 import { reapplyHeader } from "./parsers";
 
 // 按列类型构造选项（select / mSelect）
-export function computeColumnOptions(colVals, type) {
+// isCSV：透传自导入入口，决定 mSelect 选项是否按空格切分（见 buildMSelectOptions）。
+export function computeColumnOptions(colVals, type, isCSV = false) {
   if (type === "select") return buildSelectOptions(colVals);
-  if (type === "mSelect") return buildMSelectOptions(colVals);
+  if (type === "mSelect") return buildMSelectOptions(colVals, isCSV);
   return [];
 }
 
@@ -42,8 +43,9 @@ export function autoMatch(sourceCols, targetCols) {
 // 根据去重策略计算增量预览
 // matchMap: Map<srcIndex, targetKeyID | null>
 // strategy: "primary" | "row" | "none"
+// isCSV：透传自导入入口，决定 mSelect 是否按空格切分（与源/目标 canon 保持同一规则）
 // 返回 { newRows, duplicateRows, skippedEmptyPrimary, unmatchedSource, unmatchedTarget }
-export function computeIncremental(parsed, existing, matchMap, strategy) {
+export function computeIncremental(parsed, existing, matchMap, strategy, isCSV = false) {
   const primaryTarget = existing.columns.find((c) => c.type === "block");
   const existingPrimarySet = new Set((existing.existingPrimary || []).map((s) => String(s).trim()));
   const existingRowHashSet = new Set(existing.rowHashes || []);
@@ -66,7 +68,7 @@ export function computeIncremental(parsed, existing, matchMap, strategy) {
     if (strategy === "primary" && primaryTarget) {
       if (primaryVal !== "" && existingPrimarySet.has(primaryVal)) isDup = true;
     } else if (strategy === "row") {
-      if (existingRowHashSet.has(buildRowKey(r, existing, targetToSrc))) isDup = true;
+      if (existingRowHashSet.has(buildRowKey(r, existing, targetToSrc, isCSV))) isDup = true;
     }
     if (primaryVal === "") {
       // 主列为空 → 视为无效行（PRD §6.3 / §7），导入时跳过

@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.3.1] - 2026-07-29
+
+### Fix: mSelect 非 CSV 路径不再按空格分词（坑 8）
+
+- **现象**：Markdown 表格 / 表格转数据库转换 导入时，含空格的 mSelect 值被错误拆分（如 `硅谷 AI 实验室` → `硅谷`+`AI`+`实验室`）；而 CSV 导入本就需要按空格切（单元格内多值只能用空格分隔）。
+- **根因**：`tokenizeMselect` 无条件先按空白切、再按 `MSELECT_SEP_RE` 切，未区分导入来源。
+- **修复（8 个源文件全量透传 `isCSV`）**：`tokenizeMselect(text, isCSV=false)` 新增 `isCSV` 参数——`isCSV=true`（CSV 导入）保留「先按空白拆、再标点拆」；`isCSV=false`（Markdown 导入 / 转换，默认）仅按 `MSELECT_SEP_RE` 切、**不按空格切**。同一 `isCSV` 透传到 `canonRawCell`/`canonValueCell`/`buildCell`/`buildMSelectOptions`/`buildRowKey` 及导入入口（`ImportWizard.js`、`parsers.js`），确保「写库」与「去重 canon」用同一规则、同一 `isCSV`，消除切分不对称导致的去重漏匹配或写入不一致。
+- **兼容性**：CSV 导入行为完全不变；仅非 CSV 的 Markdown / 转换路径改为「整段（含空格）视为单个标签」。
+- 同步更新 `DESIGN.md`（坑 8 标记已修复、各函数签名补充 `isCSV`、当前版本升 1.3.1）。
+
 ## [1.3.0] - 2026-07-28
 
 ### Chore: 更新 preview.png 预览图并升版至 1.3.0

@@ -15,7 +15,7 @@ import {
   generateId, generateBlockId, getTimestamp, escapeHtml, typeLabel,
   inferType, buildSelectOptions, buildMSelectOptions,
   getBlockInfo, createDocHistory, removeBlock, api,
-  buildCell, buildAVJson, FIELD_TYPES, MSELECT_SEP_RE, MSELECT_SPLIT_RE,
+  buildCell, buildAVJson, FIELD_TYPES, MSELECT_SEP_RE, MSELECT_SPLIT_RE, tokenizeMselect,
   captureCurrentAnchor, setLastFocusedProtyle, refreshAnchorBlockFromSelection,
 } from "./common";
 import { openImportWizard } from "./import/ImportWizard";
@@ -113,7 +113,8 @@ function openFieldTypePanel(tableBlock) {
         if (v === "") return '<span style="color:#bbb;">—</span>';
         const sel = colDefs[colIdx].selectedType;
         if (sel === "mSelect") {
-          const parts = v.split(MSELECT_SPLIT_RE).map((x) => x.trim()).filter(Boolean);
+          // 转换预览：转换路径一律非 CSV，仅按逗号类分隔符切（与 buildCell 写入一致，v1.3.1）
+          const parts = tokenizeMselect(v, false);
           return parts.map((p) => `<span class="b3-chip">${escapeHtml(p)}</span>`).join(" ");
         }
         if (sel === "select") {
@@ -336,7 +337,7 @@ async function convertTable(tableBlock, opts = {}) {
     const type = userType || inferred;
     let options = [];
     if (type === "select") options = buildSelectOptions(colValues);
-    else if (type === "mSelect") options = buildMSelectOptions(colValues);
+    else if (type === "mSelect") options = buildMSelectOptions(colValues, false);
     return { name: name || `列${colIndex + 1}`, type, options, colIndex, isPrimary: false };
   }).filter(Boolean);
   const primaryField = { name: parsed.header[primaryIndex] || "Name", type: "block", colIndex: primaryIndex, isPrimary: true };
@@ -359,6 +360,7 @@ async function convertTable(tableBlock, opts = {}) {
     insertAfterId: blockId,
     rootID,
     reload: false,
+    isCSV: false,
   });
 
   // 删除原表格块（导入流程不删源，这里仅转换流程删除）

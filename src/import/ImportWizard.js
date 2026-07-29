@@ -9,7 +9,7 @@
 import { Dialog, showMessage } from "siyuan";
 import {
   I18N, FIELD_TYPES, typeLabel, escapeHtml, parseFlexibleDateToMs,
-  getCurrentBlockId, getBlockInfo, MSELECT_SPLIT_RE,
+  getCurrentBlockId, getBlockInfo, tokenizeMselect,
   captureCurrentAnchor, buildRowKey,
 } from "../common";
 import { parseCsv, parseMarkdown, reapplyHeader } from "./parsers";
@@ -304,7 +304,7 @@ export class ImportWizard {
       <div class="iw-section-title">${escapeHtml(t("deduplication", "去重策略"))}</div>
       ${dedupe}`;
 
-    const inc = computeIncremental(p, ex, this.matchMap, this.dedupeStrategy);
+    const inc = computeIncremental(p, ex, this.matchMap, this.dedupeStrategy, this.sourceType === "csv");
     const stat = `<div class="iw-stat">
       <div>${escapeHtml(t("newRows", "新增 {n} 行").replace("{n}", inc.newRows))}</div>
       <div>${escapeHtml(t("duplicateRows", "重复 {n} 行").replace("{n}", inc.duplicateRows))}（${escapeHtml(t("skipHint", "将跳过"))}）</div>
@@ -327,6 +327,8 @@ export class ImportWizard {
 
   // 右侧预览（通用）。dupMode: null | "row" | "row-dedup"
   renderPreview(p, existing, dupMode) {
+    // 预览的 mSelect 切分规则与写入一致：仅 CSV 源按空格切（v1.3.1）
+    const isCSV = this.sourceType === "csv";
     // 计算「主列/主键」对应的源列下标，用于在表头渲染主列 chip：
     // - 旧库模式（existing 存在，step3b）：在 existing.columns 中找到 type==="block" 的目标列，
     //   再遍历 matchMap（源列 index -> 目标 keyID）找出匹配的源列下标。
@@ -366,9 +368,9 @@ export class ImportWizard {
         const pIdx = primaryTarget ? targetToSrc[primaryTarget.keyID] : undefined;
         const pVal = pIdx != null ? (r[pIdx] != null ? String(r[pIdx]).trim() : "") : "";
         if (this.dedupeStrategy === "primary" && primaryTarget && pVal !== "" && existingPrimarySet.has(pVal)) dup = true;
-        else if (this.dedupeStrategy === "row" && existingRowHashSet.has(buildRowKey(r, existing, targetToSrc))) dup = true;
+        else if (this.dedupeStrategy === "row" && existingRowHashSet.has(buildRowKey(r, existing, targetToSrc, isCSV))) dup = true;
       }
-      const cells = p.columns.map((c) => `<td>${this.previewValue(r[c.index], c.type)}</td>`).join("");
+      const cells = p.columns.map((c) => `<td>${this.previewValue(r[c.index], c.type, isCSV)}</td>`).join("");
       rowsHtml.push(`<tr class="${dup ? "iw-dup" : ""}">${cells}</tr>`);
     }
     // 行数信息
@@ -385,7 +387,7 @@ export class ImportWizard {
       <table>${head}${rowsHtml.join("")}</table>${more}`;
   }
 
-  previewValue(v, type) {
+  previewValue(v, type, isCSV = false) {
     const s = v == null ? "" : String(v);
     if (s === "" && type !== "checkbox") return '<span style="color:#bbb;">—</span>';
     switch (type) {
@@ -396,7 +398,8 @@ export class ImportWizard {
       case "select":
         return s ? `<span class="b3-chip">${escapeHtml(s)}</span>` : "";
       case "mSelect": {
-        const parts = s.split(MSELECT_SPLIT_RE).map((x) => x.trim()).filter(Boolean);
+        // 预览切分与写入一致：仅 CSV 源按空格切（v1.3.1）
+        const parts = tokenizeMselect(s, isCSV);
         return parts.map((p) => `<span class="b3-chip">${escapeHtml(p)}</span>`).join(" ");
       }
       case "block":
@@ -534,7 +537,7 @@ export class ImportWizard {
         this.existing = null;
         if (this.selectedAvID) {
           try {
-            this.existing = await readAV(this.selectedAvID, this.getBlockIDByAv(this.selectedAvID));
+            this.existing = await readAV(this.selectedAvID, this.getBlockIDByAv(this.selectedAvID), this.sourceType === "csv");
             this.matchMap = autoMatch(this.parsed.columns, this.existing.columns);
           } catch (err) {
             showMessage((err && err.message) || String(err));
@@ -569,7 +572,7 @@ export class ImportWizard {
         this.parsed.columns[idx].type = ty;
         if (ty === "select" || ty === "mSelect") {
           const colVals = this.parsed.rows.map((r) => (r[idx] != null ? r[idx] : ""));
-          this.parsed.columns[idx].options = computeColumnOptions(colVals, ty);
+          this.parsed.columns[idx].options = computeColumnOptions(colVals, ty, this.sourceType === "csv");
         } else {
           this.parsed.columns[idx].options = [];
         }
@@ -756,11 +759,13 @@ export class ImportWizard {
           dbName: this.dbName,
           // 显式传入锚点文档 rootID，确保刷新落在正确文档（不再依赖插入后回查）
           rootID: anchorRootID || undefined,
+          // 透传是否为 CSV 导入：仅 CSV 按空格切分 mSelect（v1.3.1）
+          isCSV: this.sourceType === "csv",
         });
         await this.showImportResult(res, anchorRootID);
       } else if (this.step === "3b") {
         showMessage(t("importing", "导入中…"));
-        const res = await appendToExisting(this.parsed, this.existing, this.matchMap, this.dedupeStrategy, {});
+        const res = await appendToExisting(this.parsed, this.existing, this.matchMap, this.dedupeStrategy, { isCSV: this.sourceType === "csv" });
         await this.showImportResult(res, anchorRootID);
       }
     } catch (e) {

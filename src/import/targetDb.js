@@ -36,8 +36,9 @@ function decodeBase64Unicode(b64) {
 // 从 SiYuan Value 结构中提取整行去重用的规范文本（统一委托 common.canonValueCell，
 // 确保与目标库 readAV 的 rowHashes 及源侧 buildRowKey 采用同一套归一规则）。
 // options: 该列 keyOptions（mSelect/select 单元格若只存 id 引用，可据此反查文本）。
-function cellText(v, type, options) {
-  return canonValueCell(v, type, options);
+// isCSV：透传自导入入口，决定 mSelect 是否按空格切分（与源侧 buildRowKey 保持同一规则）。
+function cellText(v, type, options, isCSV = false) {
+  return canonValueCell(v, type, options, isCSV);
 }
 
 // 枚举指定文档全部 NodeAttributeView 块，返回 { avID, blockID, name }[]
@@ -100,7 +101,8 @@ export async function listExistingAVs(opts = {}) {
 
 // 读取单个已有 AV 的 schema、主列值、整行哈希
 // 抛错（目标库不存在 / 解析失败）由调用方捕获并提示
-export async function readAV(avID, blockID) {
+// isCSV：透传自导入入口，决定 mSelect 是否按空格切分（与目标库 rowHashes 计算及源侧 canon 保持同一规则）
+export async function readAV(avID, blockID, isCSV = false) {
   let json;
   try {
     // 注意：/api/file/getFile 返回的是文件原始内容（不是标准 {code,data} 信封），
@@ -190,7 +192,7 @@ export async function readAV(avID, blockID) {
   for (let k = 0; k < rowCount; k++) {
     // 把该列的 keyOptions 一并传入，供 canonValueCell 在 mSelect/select 单元格
     // 仅存 id 引用时反查真实文本（修复「备注=多选」整行去重误判新增）。
-    const parts = kvs.map((kv) => cellText(kv.values ? kv.values[k] : null, kv.key.type, kv.key.options || []));
+    const parts = kvs.map((kv) => cellText(kv.values ? kv.values[k] : null, kv.key.type, kv.key.options || [], isCSV));
     rowHashes.push(parts.join("\u0001"));
   }
 

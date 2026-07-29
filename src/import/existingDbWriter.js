@@ -65,7 +65,7 @@ export async function appendToExisting(parsed, existing, matchMap, strategy, opt
     if (strategy === "primary" && primaryTarget) {
       if (primaryVal !== "" && existingPrimarySet.has(primaryVal)) isDup = true;
     } else if (strategy === "row") {
-      if (existingRowHashSet.has(buildRowKey(r, existing, targetToSrc))) isDup = true;
+      if (existingRowHashSet.has(buildRowKey(r, existing, targetToSrc, opts.isCSV))) isDup = true;
     }
     if (primaryVal === "") {
       // 主列为空 → 无效行跳过（PRD §6.3 / §7）
@@ -86,7 +86,7 @@ export async function appendToExisting(parsed, existing, matchMap, strategy, opt
         cell = emptyValue(col);
       } else {
         try {
-          cell = buildCell({ keyID: col.keyID, type: col.type, options: col.options || [] }, r[srcIdx]);
+          cell = buildCell({ keyID: col.keyID, type: col.type, options: col.options || [] }, r[srcIdx], opts.isCSV);
         } catch (e) {
           failureCells++;
           cell = emptyValue(col);

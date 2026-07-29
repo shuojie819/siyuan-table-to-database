@@ -7,6 +7,9 @@ dist/
 # Packaging artifacts (attached to GitHub Release, not committed)
 *.zip
 
+# Local design doc (kept local only, not committed)
+DESIGN.md
+
 # OS / editor noise
 .DS_Store
 Thumbs.db
