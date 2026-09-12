@@ -341,26 +341,74 @@ export function normalizeNumberString(raw) {
   return Number.isFinite(n) ? String(n) : s;
 }
 
+// 【v1.3.4 数据丢失修复】结构化数值解析器：识别 / 归一 / 写入三处的唯一真源。
+//
+// 背景（已发布的静默数据丢失 bug）：识别侧（isExplicitNumber / detectScalar）用「去货币符号 + 千分位正则」
+// 判出 "1,000" / "$3.5" 为 number，但归一/写入侧（normalizeNumberString / canonRawCell(number) /
+// buildCell(number)）只认 Number(x)，而 Number("1,000") 是 NaN → 含千分位/货币符号的金额列被判为
+// number，却被整列写成空值（写入为空、回读为空）→ 静默数据丢失。
+//
+// 本函数把「去首尾货币符号 → 排除十六/二/八进制字面量与下划线 → 标准千分位 → 普通十进制/科学计数」
+// 收敛到一处，供识别(isStructuredNumber)、源侧 canon(canonRawCell)、写入(buildCell) 共用，
+// 彻底消除不同源问题。返回有限 JS number，无法解析时返回 null。
+const CURRENCY_RE = /^[\s¥$€£]+|[\s¥$€£]+$/g;
+export function parseStructuredNumber(raw) {
+  let s = String(raw == null ? "" : raw).trim();
+  if (!s) return null;
+  s = s.replace(CURRENCY_RE, "");
+  if (!s) return null;
+  if (/^[-+]?0[xXoObB]/.test(s)) return null; // 排除 0x1f / 0b101 / 0o17 等非十进制字面量
+  if (s.includes("_")) return null;            // 排除 1_000 数字分隔符
+  const sign = /^-/.test(s) ? -1 : 1;
+  const body = s.replace(/^[-+]/, "");
+  if (/^\d{1,3}(,\d{3})+(\.\d+)?$/.test(body)) {
+    const n = Number(body.replace(/,/g, ""));
+    return Number.isFinite(n) ? sign * n : null;
+  }
+  if (/^(\d+(\.\d+)?|\.\d+)([eE][-+]?\d+)?$/.test(body)) {
+    const n = Number(s);
+    return Number.isFinite(n) ? n : null;
+  }
+  return null;
+}
+
+// 是否「可解析为结构化数值」：识别侧（detectScalar 第 4 步）与 inferType 数值占比均用此判定，
+// 与 parseStructuredNumber 同源，保证「判为 number 的值一定可被写入且不为空」。
+export function isStructuredNumber(v) {
+  return parseStructuredNumber(v) != null;
+}
+
 // 源侧（原始字符串 + 目标列类型）→ 规范文本
-// isCSV：透传自导入/转换入口，决定 mSelect 是否按空格切分（见 tokenizeMselect）。
+// isCSV：保留仅为兼容调用方签名。自 v1.4 起，去重归一已与 isCSV 解耦
+// （mSelect 恒定按最细粒度切分、select 按整值归一），该参数在归一分支不再被读取。
 export function canonRawCell(raw, type, isCSV = false) {
   if (raw == null) return "";
   switch (type) {
     case "mSelect":
-      return normalizeMulti(tokenizeMselect(raw, isCSV).filter(isMeaningfulToken));
+      // 【B5 跨源去重修复】去重 key 的 mSelect 归一恒定按最细粒度切分（tokenizeMselect(..., true)），
+      // 与本次运行标志 isCSV 解耦：CSV 源("AI Agent 知识库" 空格切)与 Markdown 源(整段)得到同一 key，
+      // 消除「库中已存 3 标签、MD 再导入整段当 1 标签 → 判新增 → 重复插入」的跨源去重失效。
+      // 写入形态仍由 buildCell(..., isCSV) 决定（不变），此处仅统一「去重 key」语义。
+      return normalizeMulti(tokenizeMselect(raw, true).filter(isMeaningfulToken));
     case "select":
-      return String(raw).trim().toLowerCase();
+      // 改造 1.7：select 语义上是**单值**，两侧都只做「整值 trim + lowercase」后走 normalizeMulti，不做逗号切分
+      // （否则 "Hong Kong" 会被过度归一为 "hong,kong"，与 "Hong,Kong" 混同）。
+      // 与目标侧(canonValueCell select)完全对齐，修复原来源侧 lower、目标侧不 lower
+      // （"Alpha" vs 选项 "Alpha"）的大小写不对称。
+      return normalizeMulti([String(raw).trim().toLowerCase()]);
     case "checkbox":
       return CHECK_TRUE.has(String(raw).trim().toLowerCase()) ? "1" : "0";
     case "date": {
       const ms = parseFlexibleDateToMs(raw);
       return formatDateCanonical(ms);
     }
-    case "number":
-      // 非有限值（Infinity/NaN/1e999/"abc" 等）视为空，与 buildCell(number) 写入的空值、
-      // canonValueCell(number) 读回的空值对齐，保证「源 row key」与「目标 row key」对非法数值列严格一致，
-      // 消除二次导入重复；其余走 normalizeNumberString 归一为 String(Number(raw))。
-      return Number.isFinite(Number(raw)) ? normalizeNumberString(raw) : "";
+    case "number": {
+      // 【数据丢失修复】与识别侧(isStructuredNumber)及写入侧(buildCell number)走同一结构化解析器：
+      // "1,000"/"$3.5"/"¥1,200.50" 等可解析 → String(n)（如 "1000"），
+      // 非结构化值(Infinity/NaN/1e999/abc/0x1f/1_000 等) → ""（与 buildCell 写入空值、canonValueCell 读回空值对齐）。
+      const n = parseStructuredNumber(raw);
+      return n == null ? "" : String(n);
+    }
     case "block":
     case "text":
     case "url":
@@ -445,7 +493,8 @@ function extractMselectItemContent(m, opts) {
 
 // 目标侧（SiYuan Value 结构 + 类型）→ 规范文本（与 canonRawCell 同源规则）
 // options: 该列 keyOptions（仅 mSelect/select 需要，用于 id 反查文本）
-// isCSV：透传自导入/转换入口，决定 mSelect 是否按空格切分（见 tokenizeMselect）。
+// isCSV：保留仅为兼容调用方签名。自 v1.4 起，去重归一已与 isCSV 解耦
+// （mSelect 恒定按最细粒度切分、select 按整值归一），该参数在归一分支不再被读取。
 export function canonValueCell(v, type, options, isCSV = false) {
   if (!v) return "";
   switch (type) {
@@ -483,10 +532,14 @@ export function canonValueCell(v, type, options, isCSV = false) {
     }
     case "checkbox":
       return (v.checkbox && v.checkbox.checked) ? "1" : "0";
-    case "select":
+    case "select": {
       // 单选：单元格本质也是 mSelect 结构（SiYuan 统一用 mSelect 承载 select/mSelect）。
-      // 用 extractMselectItemContent 兼容所有形态，并与源侧 canonRawCell(select) 同源规则。
-      return normalizeMulti((v.mSelect || []).map((m) => extractMselectItemContent(m, options)));
+      // 改造 1.7：与源侧 canonRawCell(select) 完全同源——仅「整值 trim + lowercase」后 normalizeMulti，
+      // **不按逗号/空格切分**（select 为单值，避免把 "Hong Kong" 过度归一为 "hong,kong"）。
+      // 关键修复：原目标侧此处未 toLowerCase（"Alpha" 选项 → "Alpha"），与源侧 lower 后不对称；
+      // 现两侧统一 lower → 大小写对称。
+      return normalizeMulti((v.mSelect || []).map((m) => String(extractMselectItemContent(m, options)).trim().toLowerCase()));
+    }
     case "mSelect": {
       // 与 canonRawCell 对齐：每个已存标签 content 也走 tokenizeMselect，并丢弃纯符号 token。
       // 即使 SiYuan 实际存储把同一项内容拆得更细（或更粗）、或仅存 id 引用，
@@ -495,7 +548,9 @@ export function canonValueCell(v, type, options, isCSV = false) {
       // 源侧同样丢弃，保证「源 row key」与「目标 row key」在备注列始终一致。
       const allParts = [];
       (v.mSelect || []).forEach((m) => {
-        allParts.push(...tokenizeMselect(extractMselectItemContent(m, options), isCSV));
+        // 【B5 跨源去重修复】恒定按最细粒度切分（isCSV=true 语义），与源侧 canonRawCell(mSelect) 对齐，
+        // 使「去重 key」与写入标志/运行标志解耦（写入形态仍由 buildCell 的 isCSV 决定，见下）。
+        allParts.push(...tokenizeMselect(extractMselectItemContent(m, options), true));
       });
       return normalizeMulti(allParts.filter(isMeaningfulToken));
     }
@@ -520,6 +575,23 @@ export function buildRowKey(row, existing, targetToSrc, isCSV = false) {
 
 // ---------- 日期解析 ----------
 
+// 每月天数（下标 0 = 一月），2 月按 29 处理以兼容闰年写法。
+const DAYS = [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+// 月/日合法性校验（供 isDateStrict 与 parseFlexibleDateToMs 共用）。
+const okMD = (mo, d) => {
+  mo = +mo; d = +d;
+  return mo >= 1 && mo <= 12 && d >= 1 && d <= DAYS[mo - 1];
+};
+
+// 【严格日期解析】只接受明确的日期书写 + 10/13 位时间戳，**彻底移除 Date.parse 宽松兜底**。
+//
+// 移除兜底的原因：旧实现对任意串都尝试 Date.parse，导致 www.abc.com/path?q=1、$3-5、1.5 等被当作
+// 合法日期（isDate 返回 true），使 url/number 列被日期截胡。改为只认下列确定性模式：
+//   - 13 位 / 10 位纯数字时间戳；
+//   - YYYY-M-D / YYYY/M/D / YYYY.M.D（月日按 DAYS 校验）；
+//   - YYYY年M月D日；
+//   - YYYY-M（仅年月，YYYY年 亦支持）。
+// 返回本地零点毫秒；无法识别时返回 NaN。
 export function parseFlexibleDateToMs(s) {
   if (s == null) return NaN;
   const t = String(s).trim();
@@ -527,14 +599,23 @@ export function parseFlexibleDateToMs(s) {
   // 纯数字时间戳
   if (/^\d{13}$/.test(t)) return Number(t);          // 毫秒
   if (/^\d{10}$/.test(t)) return Number(t) * 1000;    // 秒
-  // 规范化常见写法：2024年1月1日 / 2024.1.1 / 2024/1/1
-  const norm = t
-    .replace(/年/g, "-").replace(/月/g, "-").replace(/日/g, "")
-    .replace(/\./g, "-").replace(/\//g, "-");
-  let ms = Date.parse(norm);
-  if (!isNaN(ms)) return ms;
-  ms = Date.parse(t);
-  return ms;
+  let m;
+  if ((m = /^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$/.exec(t))) {
+    if (!okMD(m[2], m[3])) return NaN;
+    return new Date(+m[1], +m[2] - 1, +m[3]).getTime();
+  }
+  if ((m = /^(\d{4})年(\d{1,2})月(\d{1,2})日$/.exec(t))) {
+    if (!okMD(m[2], m[3])) return NaN;
+    return new Date(+m[1], +m[2] - 1, +m[3]).getTime();
+  }
+  if ((m = /^(\d{4})[-/.](\d{1,2})$/.exec(t))) {
+    if (+m[2] < 1 || +m[2] > 12) return NaN;
+    return new Date(+m[1], +m[2] - 1, 1).getTime();
+  }
+  if (/^\d{4}年$/.test(t)) {
+    return new Date(+t.slice(0, 4), 0, 1).getTime();
+  }
+  return NaN;
 }
 
 // ---------- 类型推断（启发式，PRD §6.1，禁止重写） ----------
@@ -553,92 +634,116 @@ function extractAnchorHref(s) {
   return m ? m[1].trim() : null;
 }
 
-// 判断字符串是否「像 Web URL」：http/https/ftp、www.、协议相对(//)，
-// 或纯域名结构（标签.标签+，可选 :端口，可选 /路径?查询#hash，路径允许中文/特殊字符）。
+// 判断字符串是否「像 Web URL」（严格版，改造 1.3）：修掉 report.pdf / archive.zip / Mr.Smith。
+// 规则：
+//   1) 含 @ 视为邮箱候选，不判 URL（email 优先级更高）；
+//   2) http:// https:// ftp:// 协议 → 直通；
+//   3) 协议相对 //host/path → 直通；
+//   4) www. 开头 → 直通；
+//   5) 其余按「标签.标签+，可选 :端口 与 /路径」结构解析；末段（TLD）必须以字母/汉字开头
+//      （排除 1.5 / 2024.1.1 等小数）、不得是已知文件扩展名（report.pdf / archive.zip → 非 URL）、
+//      且必须命中 TLD 白名单（Mr.Smith 的 "Smith" 非 TLD → 非 URL）。
 // 注意：siyuan://、mailto:、tel: 等非 Web 协议不算 URL，避免思源内部链接被误判。
 //
-// 修复：域名末段（TLD）必须**以字母或汉字开头**（[a-z一-龥][a-z0-9一-龥-]*），
-// 否则纯数字末段会把 1.5 / 100.00 / 2024.1.1 这类小数误判成 URL（detectScalar 中 url
-// 判定排在 number/date 之前，会导致整数/小数数值列被整体推断为 url）。
-function looksLikeWebUrl(s) {
-  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(s)) {
-    return /^https?:\/\//i.test(s) || /^ftp:\/\//i.test(s);
-  }
+// 已裁定取舍：archive.zip 会被判 text（.zip 虽是真实 gTLD，但白名单不收录——
+// 「archive.zip 是文件」远多于「archive.zip 是主机名」；带协议的 https://x.zip 仍直通）。
+const FILE_EXT = new Set(["pdf","zip","png","jpg","jpeg","gif","svg","mp3","mp4","doc","docx",
+  "xls","xlsx","ppt","pptx","txt","csv","md","json","xml","html","tar","gz","rar","7z","exe"]);
+const TLD_WHITELIST = new Set(["com","org","net","io","ai","co","cn","uk","us","gov","edu","dev",
+  "app","me","info","biz","xyz","top","site","online","tech","store","shop","blog","live","tv",
+  "cc","fm","gg","id","hk","jp","kr","de","fr","ru","au","ca"]);
+export function isUrlStrict(v) {
+  const s = String(v == null ? "" : v).trim();
+  if (!s || s.includes("@")) return false;
+  if (/^https?:\/\//i.test(s) || /^ftp:\/\//i.test(s)) return true;
+  if (/^\/\//.test(s)) return true;
   if (/^www\./i.test(s)) return true;
-  if (/^\/\//.test(s)) return true; // 协议相对 //host/path
-  // 末段要求 [a-z一-龥][a-z0-9一-龥-]*（字母/汉字开头），排除 1.5、100.00、2024.1.1 等小数；
-  // 保留 example.com、a.io、www.abc.com/path?q=1 等正常用例。
-  return /^(?:[a-z0-9一-龥-]+\.)+[a-z一-龥][a-z0-9一-龥-]*(?::\d{1,5})?(?:\/[^\s]*)?$/i.test(s);
+  const m = /^(?:[a-z0-9\u4e00-\u9fff-]+\.)+([a-z\u4e00-\u9fff][a-z0-9\u4e00-\u9fff-]*)(?::\d{1,5})?(?:\/[^\s]*)?$/i.exec(s);
+  if (!m) return false;
+  const tld = m[1].toLowerCase();
+  if (FILE_EXT.has(tld)) return false;       // report.pdf / archive.zip → text
+  return TLD_WHITELIST.has(tld);             // Mr.Smith → text
 }
 
+// 源侧 URL 判定（保留原签名与 anchor 行为）：先对思源单元格可能的超链接 HTML（<a href="...">）
+// 取 href，再走严格判定。detectScalar 第 2 步调用本函数（而非直接 isUrlStrict），
+// 以保留「单元格内容是 <a href=…> HTML 时判为 url」的能力（CSV/Markdown 粘贴的单元格可能含 anchor HTML）。
 export function isUrl(v) {
   const s = String(v == null ? "" : v).trim();
   if (s === "") return false;
-  if (s.includes("@")) return false; // 含 @ 视为邮箱候选，不判为 URL（email 推断优先级更高）
-  // 若传入的是超链接 HTML（思源单元格可能含 <a href="...">），优先提取真实 URL 判断
-  const candidate = extractAnchorHref(s) || s;
-  return looksLikeWebUrl(candidate);
+  if (s.includes("@")) return false;
+  return isUrlStrict(extractAnchorHref(s) || s);
 }
 
-export function isPhone(v) {
-  const s = String(v).trim();
-  // 排除日期格式：含日期分隔符且可解析为合法日期的字符串应判为「日期」而非「电话」，
-  // 否则 2024-01-01 这类值会被 detectScalar 在 date 之前先命中 phone，导致日期列被误判为电话。
-  if (isDate(v)) return false;
-  if (!/^[+\d\s().-]{7,20}$/.test(s)) return false;
-  const digits = s.replace(/[^\d]/g, "");
-  if (digits.length < 7 || digits.length > 15) return false;
-  if (/[+\s().-]/.test(s)) return true;
-  return digits.length >= 11;
-}
-
-export function isDate(v) {
-  const s = String(v).trim();
-  if (s === "" || /^-?\d+$/.test(s)) return false;       // 纯数字交给 number
-  // 数字形态串（1.5 / 3.14 / 100.00 / 1.2.3 / -0.5 / +2.5 / .5 等）一律不是日期。
-  // 否则会被 parseFlexibleDateToMs 把 "." 替换成 "-" 后交给 Date.parse 解析成合法日期
-  // （V8 里 '1.5'→'1-5'→2001-05-01、'-0.5'→'-0-5' 亦为合法时间戳）而误判为 date——
-  // 这是 looksLikeWebUrl 修复后的连带缺陷，只修 url 不够：detectScalar('1.5') 会从 url 变成 date。
-  // 注意：必须覆盖「可选正负号 + 可选前导点」的形态，否则 -0.5 / -1.5 / .5 会绕过守卫
-  // （旧写法 ^\d+ 只匹配以数字开头的串）。
-  // 仅当点分串形如「4 位年份开头」的 YYYY.M.D / YYYY-M-D 时才放行给日期处理。
-  if (/^[-+]?\.?\d+(\.\d+)*$/.test(s) && !/^\d{4}[.\-]\d{1,2}[.\-]\d{1,2}$/.test(s)) return false;
-  if (!/[-/年月.]/.test(s)) return false;
-  return !isNaN(parseFlexibleDateToMs(s));
-}
-
-export function isNumber(v) {
-  const s = String(v).trim();
-  // 用 Number.isFinite 而非 !isNaN：Infinity / -Infinity / NaN 均非「有效数值」，
-  // 避免把 "Infinity" 之类的非有限串判为 number（否则写库 content 会变成 null）。
-  return s !== "" && Number.isFinite(Number(v));
-}
-
-// 明确数值形态判定：用于修正「含千分位逗号的金额列被误判 mSelect」「带货币符号的小数被误判 date」。
-// 规则（先去掉首尾货币符号 ¥ $ € £ 与空白）：
-//   - 标准千分位：/^-?\d{1,3}(,\d{3})+(\.\d+)?$/ → 去逗号后 Number.isFinite；
-//   - 普通十进制 / 科学计数：/^-?\d+(\.\d+)?([eE][-+]?\d+)?$/ → Number.isFinite；
-//   - 其它 → false。
-// 注意："1,2,3"（逗号分隔但非标准千分位）不匹配任一形态 → 保持非数值（仍可判 mSelect）。
-export function isExplicitNumber(v) {
-  let s = String(v == null ? "" : v).trim();
-  if (s === "") return false;
-  s = s.replace(/^[¥$€£\s]+/, "").replace(/[¥$€£\s]+$/, "");
-  if (s === "") return false;
-  if (/^-?\d{1,3}(,\d{3})+(\.\d+)?$/.test(s)) return Number.isFinite(Number(s.replace(/,/g, "")));
-  if (/^-?\d+(\.\d+)?([eE][-+]?\d+)?$/.test(s)) return Number.isFinite(Number(s));
+// 严格日期判定（改造 1.2）：只认 10/13 位时间戳与明确的日期书写，**彻底移除 Date.parse 宽松兜底**，
+// 避免 isDate("www.abc.com/path?q=1") / isDate("$3-5") 这类泄漏（旧实现均返回 true）。
+export function isDateStrict(v) {
+  const s = String(v ?? "").trim();
+  if (!s) return false;
+  let m;
+  if ((m = /^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$/.exec(s))) return okMD(m[2], m[3]); // YYYY-M-D / / / .
+  if ((m = /^(\d{4})年(\d{1,2})月(\d{1,2})日$/.exec(s))) return okMD(m[2], m[3]);      // YYYY年M月D日
+  if (/^\d{4}年$/.test(s)) return true;                                                // YYYY年
+  if ((m = /^(\d{4})[-/.](\d{1,2})$/.exec(s))) return +m[2] >= 1 && +m[2] <= 12;        // YYYY-M
   return false;
 }
 
+// 兼容旧导出名。
+export function isDate(v) {
+  return isDateStrict(v);
+}
+
+// 严格电话判定（改造 1.4）：修掉 IPv4（192.168.1.1）与非法日期（2024.13.45）的兜底陷阱。
+export function isPhoneStrict(v) {
+  const s = String(v == null ? "" : v).trim();
+  if (isDateStrict(s)) return false;                       // 日期优先（2024-01-01 不是电话）
+  if (!/^[+\d\s().-]{7,30}$/.test(s)) return false;        // 仅允许电话常见字符
+  if (/^\d{1,4}(\.\d{1,4}){2,3}$/.test(s)) return false;   // 192.168.1.1 / 2024.13.45 / 1.2.3.4
+  const digits = s.replace(/\D/g, "");
+  if (digits.length < 7 || digits.length > 15) return false;
+  if (/[+\s().-]/.test(s)) return true;                    // +86-13800138000 / 138-1234-5678
+  return digits.length >= 11 && digits.length <= 12;       // 13800138000
+}
+
+// 兼容旧导出名。
+export function isPhone(v) {
+  return isPhoneStrict(v);
+}
+
+// 严格数值兜底（改造 1.5）：排除十六/二/八进制字面量与下划线，仅接受有限十进制。
+export function isNumberStrict(v) {
+  const s = String(v == null ? "" : v).trim();
+  if (!s || /^[-+]?0[xXoObB]/.test(s) || s.includes("_")) return false;
+  return Number.isFinite(Number(s));
+}
+
+// 兼容旧导出名。
+export function isNumber(v) {
+  return isNumberStrict(v);
+}
+
+// 兼容旧导出名：明确数值形态判定 = 结构化数值解析（与 isStructuredNumber 同源）。
+// 保留导出供既有调用方/测试使用（如 isExplicitNumber("1,2,3") === false）。
+export function isExplicitNumber(v) {
+  return parseStructuredNumber(v) != null;
+}
+
+// 逐值类型判定（改造 1.1）：显式顺序，命中即返回。
+// 顺序要点：
+//   - email / url / phone 在前，避免数值形态被其它规则截胡；
+//   - 结构化数值（含千分位 / 货币符号）优先于日期，故 $3.5 / 1,000 判 number，且早于 isDateStrict；
+//   - 严格日期无 Date.parse 兜底，故 www.abc.com/path?q=1 / $3-5 不再泄漏为 date；
+//   - 纯整数（含 10/13 位）由 isNumberStrict 判 number，不在本层判时间戳（避免「10 位数值列被判日期」新误判）；
+//   - 带单位后缀（100kg）不支持 → text。
 export function detectScalar(v) {
+  const s = String(v == null ? "" : v).trim();
+  if (s === "") return "text";
   if (isEmail(v)) return "email";
-  if (isUrl(v)) return "url";
-  if (isPhone(v)) return "phone";
-  // 显式数值形态（含千分位 / 货币符号）优先于日期：$3.5 / 1,000 应判 number，
-  // 且必须早于 isDate（否则 $3.5 会被日期解析截胡）；置于 isPhone 之后，避免误伤 11 位电话号。
-  if (isExplicitNumber(v)) return "number";
-  if (isDate(v)) return "date";
-  if (isNumber(v)) return "number";
+  if (isUrl(v)) return "url"; // 走 isUrl（含 <a href> 提取）而非直接 isUrlStrict，保留 anchor HTML 的 url 判定
+  if (isPhoneStrict(v)) return "phone";
+  if (isStructuredNumber(v)) return "number";
+  if (isDateStrict(v)) return "date";
+  if (isNumberStrict(v)) return "number";
   return "text";
 }
 
@@ -656,7 +761,11 @@ function isEffectivelyEmpty(v) {
 export function looksLikeMSelect(values) {
   const nonEmpty = values.filter((v) => !isEffectivelyEmpty(v));
   if (nonEmpty.length < 2) return false;
-  const multiCount = nonEmpty.filter((v) => MSELECT_SEP_RE.test(String(v))).length;
+  // 改造 1.6：仅当「值含多值分隔符」**且**「该值本身被判为 text」时才计入多选计数。
+  // 千分位 "1,000"（detectScalar → number）天然不计入，无需再在 inferType 里加「前置数值守卫」补丁。
+  const multiCount = nonEmpty.filter(
+    (v) => MSELECT_SEP_RE.test(String(v)) && detectScalar(v) === "text"
+  ).length;
   return multiCount >= 2 && multiCount / nonEmpty.length >= 0.2;
 }
 
@@ -667,13 +776,13 @@ export function inferType(values) {
   const checkboxTokens = ["✓", "✔", "☑", "x", "✗", "✘", "☐", "false", "true", "是", "否", "yes", "no", "y", "n", "1", "0"];
   if (nonEmpty.every((v) => checkboxTokens.includes(String(v).toLowerCase().trim()))) return "checkbox";
 
-  // 明确数值形态列（如千分位金额 "1,000" / 货币小数 "$3.5"）：非空值中满足 isExplicitNumber 的比例
-  // ≥ 0.8 且数量 ≥ 2 → number。必须早于 looksLikeMSelect，避免千分位逗号被当作 mSelect 分隔符而误判多选
-  // （"Hello, world" 这类非数值文本不满足 → 仍由 looksLikeMSelect 判 mSelect，不被误伤）。
-  const explicitNumCount = nonEmpty.filter((v) => isExplicitNumber(v)).length;
-  if (explicitNumCount >= 2 && explicitNumCount / nonEmpty.length >= 0.8) return "number";
+  // 结构化数值形态列（如千分位金额 "1,000" / 货币小数 "$3.5"）：非空值中满足 isStructuredNumber 的比例
+  // ≥ 0.8 且数量 ≥ 2 → number。必须早于 looksLikeMSelect（后者已排除数值 token，此处仍前置以求稳健）。
+  // 与识别/写入同源（parseStructuredNumber），确保「整列判 number」的列一定可被正确写入非空值。
+  const structuredNumCount = nonEmpty.filter((v) => isStructuredNumber(v)).length;
+  if (structuredNumCount >= 2 && structuredNumCount / nonEmpty.length >= 0.8) return "number";
 
-  // 多选：含逗号/分号/竖线/顿号等分隔符
+  // 多选：含逗号/分号/竖线/顿号等分隔符，且该值本身为文本（见 looksLikeMSelect）
   if (looksLikeMSelect(nonEmpty)) return "mSelect";
 
   // 比例阈值推断「单一标量类型」：非空值中某非文本类型占比 ≥ 80% 且至少 2 个即推断为该类型。
@@ -751,14 +860,14 @@ export function buildCell(field, rawValue, isCSV = false) {
       return { ...base, text: { content: v } };
 
     case "number": {
-      // 写入规范与 normalizeNumberString（源侧 canonRawCell / 目标侧 canonValueCell）同源。
-      // 关键：非有限值（Infinity / -Infinity / NaN，如 "Infinity"/"abc"/"1e999"）必须视为「空」——
+      // 【数据丢失修复】写入规范与识别侧(isStructuredNumber)、源侧 canonRawCell(number) 走同一
+      // 结构化解析器（parseStructuredNumber）：含千分位/货币符号的 "1,000"/"$3.5"/"¥1,200.50" 现在能
+      // 正确写入（content: 1000 / isNotEmpty:true），不再被判为 number 却写成空值。
+      // 非法值（Infinity / NaN / 1e999 → 非有限；"abc" / 0x1f / 1_000 → 不可解析）仍视为「空」——
       // content 归 0、isNotEmpty:false；否则 JSON.stringify(Infinity) 会写成 null 且 isNotEmpty 仍为 true，
-      // 使 AV 单元格被写坏，且回读端（canonValueCell 读 content:null → ""）与源端（canonRawCell 得原始串）
-      // 不对称，导致二次导入重复。非法值必须让 isNotEmpty:false 才能与源端对齐。
-      const empty = v === "";
-      const n = Number(v);
-      const ok = !empty && Number.isFinite(n);
+      // 使 AV 单元格被写坏，且回读端（canonValueCell 读空值 → ""）与源端不对称，导致二次导入重复。
+      const n = parseStructuredNumber(v);
+      const ok = n != null;
       return {
         ...base,
         number: {

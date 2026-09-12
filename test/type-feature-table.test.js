@@ -4,9 +4,9 @@
  *
  * 分组：
  *   A) CONFIRMED：期望类型 == 当前实测 → 逐条硬断言（未来若漂移即失败）。
- *   B) FLAGGED（存疑/反例）：我的期望类型 != 当前实测 → 本表**固化当前行为**以防无声漂移，
- *      但不把期望值写成实测值来「迁就实现」；差异已上报 team-lead 裁定
- *      （若裁定为缺陷，应把对应断言的 observed 改为 expected）。
+ *   B) FIXED_IN_V140：原 FLAGGED 三条的 backlog 修法已在 v1.4.0 落地
+ *      （IPv4/IPhone 兜底陷阱、文件名 vs 域名、数值限定十进制），断言改为原「期望值」
+ *      （v1.4.0 重构前这三条会失败，因为当时实测为 phone / url / number）。
  * ============================================================ */
 
 import { describe, it, expect } from "vitest";
@@ -36,16 +36,17 @@ const CONFIRMED = [
   ["Hello, world", "text"],
 ];
 
-// B) 存疑：期望类型 != 当前实测（固化当前行为，已上报 team-lead 并裁定）。
-//    三条均已裁定「确认问题但不在本轮 v1.3.3 范围」，故 src 不改，本表继续固化当前实测行为。
-//    [输入, 我的期望, 当前实测]
-const FLAGGED = [
-  // 已裁定：确认缺陷（IPv4 被判 phone），不在 v1.3.3 范围，转 backlog —— 修法为 isPhone 增加三/四段点分数字（IPv4）守卫
-  ["192.168.1.1", "text", "phone"],
-  // 已裁定：已知限制（文件名与域名同构，无上下文可区分），保留现状
-  ["report.pdf", "text", "url"],
-  // 已裁定：次要缺陷（数值语义被改写 0x1f→31；源/目标对称不产生重复行），不在 v1.3.3 范围，转 backlog（修法：数值解析限定十进制，排除 0x/0b/0o/_）
-  ["0x1f", "text", "number"],
+// B) v1.4.0 已修复：原 FLAGGED 三条的 backlog 修法落地，期望 == 实测。
+//    [输入, 期望]
+//    说明：v1.4.0 重构前这三条的实测值分别是 phone / url / number（即本轮修复的旧缺陷），
+//    故把它们从「固化实测」改为「断言期望」，即成为回归门禁。
+const FIXED_IN_V140 = [
+  // 修复：isPhoneStrict 增加三/四段点分数字（IPv4）守卫 → 192.168.1.1 不再是 phone
+  ["192.168.1.1", "text"],
+  // 修复：URL 判定末段排除已知文件扩展名 → report.pdf 不再是 url
+  ["report.pdf", "text"],
+  // 修复：数值解析限定十进制（排除 0x/0b/0o/_）→ 0x1f 不再是 number
+  ["0x1f", "text"],
 ];
 
 describe("类型特征表 A：期望 == 实测（回归门禁）", () => {
@@ -60,15 +61,8 @@ describe("类型特征表 A：期望 == 实测（回归门禁）", () => {
   });
 });
 
-describe("类型特征表 B：存疑项（实测 != 期望，已上报）", () => {
-  it.each(FLAGGED)(
-    "detectScalar('%s') 期望 '%s'，当前实测 '%s'（已裁定转 backlog，本轮不修，固化实测）",
-    (v, _expected, observed) => {
-      // 断言的是【当前实测值】而非【我的期望值】——两者不一致，已作为存疑/反例上报并裁定：
-      // 三条均「确认问题但不在本轮 v1.3.3 范围」，故 src 不改，此处固化当前行为防无声漂移。
-      // 后续若在 backlog 修复（192.168.1.1 修 isPhone / report.pdf 维持 / 0x1f 限十进制），
-      // 请把对应的 observed 改为 expected。
-      expect(detectScalar(v)).toBe(observed);
-    }
-  );
+describe("类型特征表 B：v1.4.0 已修复（期望 == 实测，回归门禁）", () => {
+  it.each(FIXED_IN_V140)("detectScalar('%s') === '%s'", (v, type) => {
+    expect(detectScalar(v)).toBe(type);
+  });
 });
