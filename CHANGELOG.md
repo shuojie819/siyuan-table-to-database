@@ -1,5 +1,49 @@
 # Changelog
 
+## [1.3.2] - 2026-07-29
+
+### Fix: 类型推断、去重归一与思源 API 错误语义的 8 处缺陷
+
+本轮修复来自一次全量代码审查 + 独立 QA 回归（44 条用例，覆盖类型推断 / 归一对称 / 思源 API 错误语义 / 大库性能 / Markdown 转义 / 预览等价性）。其中 ③④ 两处会造成**已有数据重复导入**，② 为 ① 的连带缺陷（只修 ① 不够）。
+
+**① 小数、点分数字被误判为 URL**
+- **现象**：`1.5`、`100.00`、`2024.1.1` 这类值被推断为 `url`，数值列整体错成 URL 列。
+- **根因**：`looksLikeWebUrl` 的域名末段（TLD）正则允许纯数字；而 `detectScalar` 中 `url` 判定排在 `number` / `date` 之前。
+- **修复**：域名末段必须以字母或汉字开头（`[a-z一-龥][a-z0-9一-龥-]*`）。`www.` 与协议相对 `//` 分支不变。
+
+**② 小数（含负号 / 前导点）被误判为日期——① 的连带缺陷**
+- **现象**：`1.5`、`-0.5`、`-1.5`、`.5` 被判为 `date`。
+- **根因**：只修 ① 不够。`isDate` 原守卫仅排除纯整数，而 `parseFlexibleDateToMs` 会把 `.` 归一成 `-`，于是 `Date.parse('1-5')`、`Date.parse('-0-5')` 在 V8 中均为合法日期。
+- **修复**：`isDate` 增加「数字字面量」守卫（允许可选正负号与前导点），仅放行形如 4 位年份开头的 `YYYY.M.D` / `YYYY-M-D`。边界：`1.2.3` 归为 `text`。
+
+**③ number 类型三处归一不对称 → 二次导入重复插入**
+- **现象**：同一份表格导入两次，第二次整行被判为「新增」，产生重复行。
+- **根因**：源侧 `canonRawCell` 用 `String(raw).trim()`（`"007"`）、写入侧 `buildCell` 用 `Number(v)`（`7`）、目标侧 `canonValueCell` 读回 `"7"`——三处形式不一致，导致 `buildRowKey` 与 `readAV` 的 `rowHashes` 对不上。
+- **修复**：新增 `normalizeNumberString()`，源侧与目标侧统一调用，与写入侧 `Number(v)` 同源，三者严格一致。
+
+**④ `/api/file/getFile` 的 202 错误信封被当成文件内容 → 静默把已有库当空库**
+- **现象**：导入到已有数据库时读取失败被静默忽略，全量行被重复导入；「目标数据库不存在」提示永不出现。
+- **根因**：该接口失败时返回 **HTTP 202 + `{code,msg,data}` 信封**。202 落在 `[200,299]` 区间内使 `resp.ok === true`，错误信封被当作文件原文返回，`JSON.parse` 成功，`json.keyValues || []` 得到空数组。
+- **修复**：`getFile` 保守识别错误信封（文本为普通对象且 `code` 为非 0 数字、且含 `msg` 或 `data`）并抛错；`readAV` 增加 schema 校验（`keyValues` 存在但非数组即抛错），不再静默降级为空库。
+
+**⑤ `readAV` 逐行请求块内容 → 大库导入极慢**
+- **现象**：主列块内容缺失时按行调 `/api/block/getBlockInfo`，1000 行的库即 1000 次请求。
+- **修复**：优先用 `/api/query/sql` 批量取回（每批 ≤ 500 个 id）；SQL 不可用（内核不支持 / 被禁用 / 抛错）时**自动降级**回原逐行逻辑，行为不回退。
+
+**⑥ 预览去重 O(n×m) → 大表预览卡顿**
+- **根因**：`renderPreview` 在每行循环体内重建 `Set(existingPrimary)`、`Set(rowHashes)` 与 `targetToSrc`。
+- **修复**：三者提到循环外只算一次。渲染结果与重复行判定经测试证明与旧实现**逐字节等价**。
+
+**⑦ Markdown 表格 `\|` 转义未处理 → 整表列错位**
+- **现象**：单元格内含 `\|`（GFM 字面竖线）时被当作分隔符，列数虚高、整表错位。
+- **修复**：`splitPipe` 改为逐字符扫描，正确处理 `\|`（字面竖线）与 `\\`（字面反斜杠），保留原有「去首尾 `|`、逐格 trim」语义。
+
+**工程化**
+- 引入 vitest + happy-dom 测试基建：`resolve.alias` 将 `^siyuan$` 指向 `test/stubs/siyuan.js`（npm 上的 `siyuan` 包仅含类型声明、无运行时入口）；新增 44 条回归用例覆盖上述全部修复，`npm run test` 全绿。
+- 纳入 `package-lock.json`。
+- 统一补齐 `src/`、`test/` 下 JS 源文件的 UTF-8 BOM。其中 `columnMap.js`、`existingDbWriter.js`、`newDbWriter.js`、`index.js` 仅为编码变化，**无逻辑改动**。
+- 版本提升至 1.3.2，重新构建并打包 `package.zip` / `siyuan-table-to-database.zip`。
+
 ## [1.3.1] - 2026-07-29
 
 ### Fix: mSelect 非 CSV 路径不再按空格分词（坑 8）

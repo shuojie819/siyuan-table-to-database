@@ -1,4 +1,4 @@
-/* ============================================================
+﻿/* ============================================================
  * targetDb.js — 目标库（已有 Attribute View）枚举与读取
  *
  * 红线约束（ARCH §6 / R1）：
@@ -39,6 +39,56 @@ function decodeBase64Unicode(b64) {
 // isCSV：透传自导入入口，决定 mSelect 是否按空格切分（与源侧 buildRowKey 保持同一规则）。
 function cellText(v, type, options, isCSV = false) {
   return canonValueCell(v, type, options, isCSV);
+}
+
+// 用 /api/query/sql 批量取回主列块内容（blockId → content 文本）。
+// 分批切 IN 列表（每批 ≤500）避免 SQL 过长；ID 用单引号包裹并转义内部单引号（'' 表示字面 '）。
+// 任一批失败（内核不支持 SQL / SQL 被禁用 / 语法错误等）→ 立即返回已解析结果（可能为空），
+// 由调用方回退到逐行 getBlockInfo，保证行为不回退。
+async function resolvePrimaryBySQL(unresolvedIndices) {
+  const map = new Map();
+  const BATCH = 500;
+  const ids = unresolvedIndices.map((u) => u.blockId).filter(Boolean);
+  for (let i = 0; i < ids.length; i += BATCH) {
+    const slice = ids.slice(i, i + BATCH);
+    const inList = slice.map((id) => `'${String(id).replace(/'/g, "''")}'`).join(",");
+    const stmt = `SELECT id, content FROM blocks WHERE id IN (${inList})`;
+    let rows;
+    try {
+      rows = await api("/api/query/sql", { stmt });
+    } catch (e) {
+      console.warn("[import] readAV 批量 SQL 查询失败，回退逐行 getBlockInfo", e);
+      return map;
+    }
+    if (!Array.isArray(rows)) return map;
+    rows.forEach((r) => {
+      if (r && r.id != null) map.set(String(r.id), (r.content != null ? String(r.content) : "").trim());
+    });
+  }
+  return map;
+}
+
+// 回退路径：逐行调 /api/block/getBlockInfo（并行，限并发 20，避免压垮后端）。
+// 与旧实现完全一致：成功取 data.content，失败降级空串（该行不匹配任何源行，安全）。
+async function resolvePrimaryByBlockInfo(unresolvedIndices, existingPrimary) {
+  const CONCURRENCY = 20;
+  console.log("[import] readAV 主列块内容缺失，通过 getBlockInfo 逐行解析：", unresolvedIndices.length, "个");
+  for (let i = 0; i < unresolvedIndices.length; i += CONCURRENCY) {
+    const batch = unresolvedIndices.slice(i, i + CONCURRENCY);
+    const results = await Promise.allSettled(
+      batch.map(({ blockId }) => api("/api/block/getBlockInfo", { id: blockId }))
+    );
+    results.forEach((r, j) => {
+      if (r.status === "fulfilled" && r.value) {
+        // getBlockInfo 返回 data 层（api() 已解包），包含 content（块文本）
+        const text = (r.value.content || "").trim();
+        existingPrimary[batch[j].idx] = text;
+      } else {
+        // API 失败则降级为空串（该行不会匹配任何源行，安全）
+        existingPrimary[batch[j].idx] = "";
+      }
+    });
+  }
 }
 
 // 枚举指定文档全部 NodeAttributeView 块，返回 { avID, blockID, name }[]
@@ -115,6 +165,17 @@ export async function readAV(avID, blockID, isCSV = false) {
     throw new Error((I18N.targetDbNotFound || "目标数据库不存在") + (e && e.message ? "：" + e.message : ""));
   }
 
+  // schema 校验：getFile 已能识别 202 错误信封并抛错（见 common.getFile），但内容仍可能不是
+  // 合法 AV JSON（普通对象空壳 / keyValues 类型错误）。此处显式校验并抛错，绝不静默降级成空库——
+  // 否则 `json.keyValues || []` 得到空数组 → 把已有库当空库 → 导旧库时全量重复导入，
+  // 且 targetDbNotFound 永远不触发。
+  if (!json || typeof json !== "object" || Array.isArray(json)) {
+    throw new Error((I18N.targetDbNotFound || "目标数据库不存在") + "：数据格式异常");
+  }
+  if (json.keyValues != null && !Array.isArray(json.keyValues)) {
+    throw new Error((I18N.targetDbNotFound || "目标数据库不存在") + "：数据格式异常");
+  }
+
   const kvs = json.keyValues || [];
   const columns = kvs.map((kv) => ({
     keyID: kv.key.id,
@@ -162,25 +223,19 @@ export async function readAV(avID, blockID, isCSV = false) {
     }
   });
 
-  // 通过 API 解析未决的块内容（并行请求，限并发 20，避免压垮后端）
+  // 解析未决的块内容。旧实现对这些行逐个调 /api/block/getBlockInfo（20 并发分批），
+  // 1000 行的库就是 1000 次请求，极慢。改为：① 优先用 /api/query/sql 一次批量取回块内容；
+  // ② SQL 不可用（内核不支持 / SQL 被禁用 / 抛错）时回退逐行 getBlockInfo，保证行为不回退。
   if (unresolvedIndices.length > 0) {
-    const CONCURRENCY = 20;
-    console.log("[import] readAV 主列块内容缺失，通过 API 解析：", unresolvedIndices.length, "个");
-    for (let i = 0; i < unresolvedIndices.length; i += CONCURRENCY) {
-      const batch = unresolvedIndices.slice(i, i + CONCURRENCY);
-      const results = await Promise.allSettled(
-        batch.map(({ blockId }) => api("/api/block/getBlockInfo", { id: blockId }))
-      );
-      results.forEach((r, j) => {
-        if (r.status === "fulfilled" && r.value) {
-          // getBlockInfo 返回 data 层（api() 已解包），包含 content（块文本）
-          const text = (r.value.content || "").trim();
-          existingPrimary[batch[j].idx] = text;
-        } else {
-          // API 失败则降级为空串（该行不会匹配任何源行，安全）
-          existingPrimary[batch[j].idx] = "";
-        }
-      });
+    console.log("[import] readAV 主列块内容缺失，批量解析：", unresolvedIndices.length, "个");
+    const bySql = await resolvePrimaryBySQL(unresolvedIndices);
+    const remain = [];
+    unresolvedIndices.forEach((u) => {
+      if (bySql.has(u.blockId)) existingPrimary[u.idx] = bySql.get(u.blockId);
+      else remain.push(u);
+    });
+    if (remain.length > 0) {
+      await resolvePrimaryByBlockInfo(remain, existingPrimary);
     }
   }
 

@@ -1,4 +1,4 @@
-/* ============================================================
+﻿/* ============================================================
  * parsers.js — CSV / Markdown 解析层 + 统一中间模型 ParsedTable
  *
  * 产出统一的 ParsedTable（PRD §5、ARCH §4），供「新建库」「导入旧库」两分支共享。
@@ -99,12 +99,30 @@ function parseCsvRecords(text, delim) {
   return records;
 }
 
-// 拆分 Markdown 表格的一行（去除首尾 | 与两端空格）
+// 拆分 Markdown 表格的一行（去除首尾 | 与两端空格）。
+// GFM 转义：`\|` 是单元格内的字面竖线（不作分隔符），`\\` 是字面反斜杠。
+// 旧实现朴素 split("|") 会把 `| a \| b | c |` 切成 4 段（应为 2 段）→ 整表列错位、列数虚高。
+// 改为逐字符扫描，正确处理上述两种转义，其余字符原样保留。
 function splitPipe(line) {
   let s = line.trim();
   if (s.startsWith("|")) s = s.slice(1);
   if (s.endsWith("|")) s = s.slice(0, -1);
-  return s.split("|").map((c) => c.trim());
+  const cells = [];
+  let cur = "";
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i];
+    if (c === "\\") {
+      const nxt = s[i + 1];
+      if (nxt === "|") { cur += "|"; i++; continue; }     // \| → 字面竖线
+      if (nxt === "\\") { cur += "\\"; i++; continue; }   // \\ → 字面反斜杠
+      cur += c;                                            // 其它转义：原样保留反斜杠
+      continue;
+    }
+    if (c === "|") { cells.push(cur.trim()); cur = ""; continue; }
+    cur += c;
+  }
+  cells.push(cur.trim());
+  return cells;
 }
 
 // 由完整清洗矩阵构造 ParsedTable（统一入口）

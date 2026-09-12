@@ -1,4 +1,4 @@
-/* ============================================================
+﻿/* ============================================================
  * ImportWizard.js — 导入向导容器（多步 Dialog 状态机）
  *
  * 步骤：Step1 数据源 → Step2 方式 → Step3a 新库（列映射+预览） / Step3b 旧库（列匹配+增量预览）
@@ -354,17 +354,27 @@ export class ImportWizard {
     }).join("")}</tr>`;
     const total = p.rows.length;
     const maxRows = Math.min(this.previewLimit, total);
+    // 去重判定所需数据（primaryTarget / 两个 Set / targetToSrc）只依赖 existing 与
+    // this.matchMap，两者在一次 renderPreview 内不变。旧实现把它们放在每行循环体内重建，
+    // 预览 N 行即 O(N×M)（每行都 new Set(existingPrimary) / new Set(rowHashes)、重建 targetToSrc），
+    // 大表明显卡顿。这里在循环外只算一次，渲染结果与 dup 判定与旧实现完全等价。
+    const dedupActive = dupMode === "row-dedup" && !!existing;
+    let primaryTarget = null;
+    let existingPrimarySet = null;
+    let existingRowHashSet = null;
+    const targetToSrc = {};
+    if (dedupActive) {
+      primaryTarget = existing.columns.find((c) => c.type === "block");
+      existingPrimarySet = new Set((existing.existingPrimary || []).map((s) => String(s).trim()));
+      existingRowHashSet = new Set(existing.rowHashes || []);
+      this.matchMap.forEach((k, s) => { if (k) targetToSrc[k] = s; });
+    }
     const rowsHtml = [];
     for (let i = 0; i < maxRows; i++) {
       const r = p.rows[i];
       let dup = false;
-      if (dupMode === "row-dedup" && existing) {
+      if (dedupActive) {
         // 仅作展示：重新判定该行是否重复
-        const primaryTarget = existing.columns.find((c) => c.type === "block");
-        const existingPrimarySet = new Set((existing.existingPrimary || []).map((s) => String(s).trim()));
-        const existingRowHashSet = new Set(existing.rowHashes || []);
-        const targetToSrc = {};
-        this.matchMap.forEach((k, s) => { if (k) targetToSrc[k] = s; });
         const pIdx = primaryTarget ? targetToSrc[primaryTarget.keyID] : undefined;
         const pVal = pIdx != null ? (r[pIdx] != null ? String(r[pIdx]).trim() : "") : "";
         if (this.dedupeStrategy === "primary" && primaryTarget && pVal !== "" && existingPrimarySet.has(pVal)) dup = true;

@@ -1,4 +1,4 @@
-import { Plugin, showMessage, Dialog, Menu } from "siyuan";
+﻿import { Plugin, showMessage, Dialog, Menu } from "siyuan";
 
 /* ============================================================
  * 表格转数据库 (Table to Database)

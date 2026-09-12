@@ -1,4 +1,4 @@
-/* ============================================================
+﻿/* ============================================================
  * common.js — 公共核心（从 index.js 抽取的可复用纯函数 + 模块级 I18N）
  *
  * 目的：
@@ -114,6 +114,13 @@ export async function removeFile(path) {
 //
 // 故此处单独 fetch 并直接返回原始文本（调用方自行 JSON.parse / 解码）。
 // 请求体与旧 api() 调用保持一致：POST JSON { path }。
+//
+// ⚠️ 另需注意：/api/file/getFile 是思源的特例接口——成功 = HTTP 200 + 文件字节；
+// 失败 = **HTTP 202** + {code,msg,data} 错误信封（code: -1 参数错误 / 403 无权限 /
+// 404 未找到 / 405 是目录 / 500 服务器错误）。202 落在 [200,299] 区间内，resp.ok 仍为 true，
+// 若不加识别，错误信封会被「假成功」返回：上游 targetDb.readAV 里 JSON.parse 成功、
+// json.keyValues || [] 得到空数组 → 静默把已有库当空库 → 导旧库分支全量重复导入，
+// 且 targetDbNotFound 永远不触发。故此处保守识别错误信封并抛错。
 export async function getFile(path) {
   const resp = await fetch("/api/file/getFile", {
     method: "POST",
@@ -121,7 +128,32 @@ export async function getFile(path) {
     body: JSON.stringify({ path }),
   });
   if (!resp.ok) throw new Error(`getFile 请求失败 [${resp.status}]: ${resp.statusText}`);
-  return await resp.text();
+  const text = await resp.text();
+  const env = parseFileErrorEnvelope(text);
+  if (env) throw new Error(`getFile 失败 [${env.code}]: ${env.msg || ""}`);
+  return text;
+}
+
+// 保守识别 /api/file/getFile 的 202 错误信封（见 getFile 注释）。
+// 判定条件（全部满足才视为信封）：
+//   - 文本以 "{" 开头且能 JSON.parse 成普通对象（非数组 / null）；
+//   - typeof json.code === "number" 且 json.code !== 0；
+//   - 对象自身含 "msg" 或 "data" 键。
+// 合法 AV JSON 顶层没有 code 字段，故不会误伤正常文件内容；其余一律当作文件原文返回。
+function parseFileErrorEnvelope(text) {
+  if (typeof text !== "string") return null;
+  const t = text.trim();
+  if (!t.startsWith("{")) return null;
+  let json;
+  try {
+    json = JSON.parse(t);
+  } catch (_) {
+    return null;
+  }
+  if (!json || typeof json !== "object" || Array.isArray(json)) return null;
+  if (typeof json.code !== "number" || json.code === 0) return null;
+  if (!("msg" in json) && !("data" in json)) return null;
+  return { code: json.code, msg: json.msg };
 }
 
 export async function insertBlockAfter(previousID, dom) {
@@ -250,6 +282,26 @@ function isMeaningfulToken(t) {
   return /[0-9A-Za-z\u4e00-\u9fff]/.test(t);
 }
 
+// 数值单元格的**统一规范形式**：源侧(canonRawCell)与目标侧(canonValueCell)必须得到完全
+// 相同的字符串，否则同一份表格二次导入时「源 row key」与「目标 row key」对不上 → 整行被误判
+// 为新增 → 重复插入。
+//
+// 旧实现三处不对称：
+//   - 源侧 canonRawCell：String(raw).trim()，'007' → "007"；
+//   - 写入 buildCell：Number(v)，存 content: 7；
+//   - 目标侧 canonValueCell：String(v.number.content).trim()，7 → "7"。
+// 源 key "007" ≠ 目标 key "7" → buildRowKey 与 readAV 的 rowHashes 永远对不上 → 二次导入重复。
+//
+// 规则：能解析为**有限**数值时返回 String(Number(v))（'007'→'7'、'1.50'→'1.5'、'1e3'→'1000'、
+// '-0.5'→'-0.5'）；不能解析时退化为去空白的原始字符串。
+// 注意：buildCell 的 number 分支写入 Number(v) 与 String(Number(v)) 同源，三者保持一致。
+export function normalizeNumberString(raw) {
+  const s = raw == null ? "" : String(raw).trim();
+  if (s === "") return "";
+  const n = Number(s);
+  return Number.isFinite(n) ? String(n) : s;
+}
+
 // 源侧（原始字符串 + 目标列类型）→ 规范文本
 // isCSV：透传自导入/转换入口，决定 mSelect 是否按空格切分（见 tokenizeMselect）。
 export function canonRawCell(raw, type, isCSV = false) {
@@ -266,7 +318,9 @@ export function canonRawCell(raw, type, isCSV = false) {
       return formatDateCanonical(ms);
     }
     case "number":
-      return String(raw).trim();
+      // 与 canonValueCell(number) 及 buildCell(number) 共用同一数值规范（normalizeNumberString），
+      // 保证「源 row key」与「目标 row key」对数值列严格一致，消除二次导入重复插入。
+      return normalizeNumberString(raw);
     case "block":
     case "text":
     case "url":
@@ -368,7 +422,9 @@ export function canonValueCell(v, type, options, isCSV = false) {
     case "text":
       return (v.text && v.text.content != null) ? String(v.text.content).trim() : "";
     case "number":
-      return (v.number && v.number.content != null) ? String(v.number.content).trim() : "";
+      // 与 canonRawCell(number) 共用同一数值规范（normalizeNumberString），
+      // 使目标侧读取（如 content: 7 → "7"）与源侧（如 '007' → "7"）严格一致。
+      return (v.number && v.number.content != null) ? normalizeNumberString(v.number.content) : "";
     case "url":
       return (v.url && v.url.content != null) ? String(v.url.content).trim() : "";
     case "email":
@@ -456,13 +512,19 @@ function extractAnchorHref(s) {
 // 判断字符串是否「像 Web URL」：http/https/ftp、www.、协议相对(//)，
 // 或纯域名结构（标签.标签+，可选 :端口，可选 /路径?查询#hash，路径允许中文/特殊字符）。
 // 注意：siyuan://、mailto:、tel: 等非 Web 协议不算 URL，避免思源内部链接被误判。
+//
+// 修复：域名末段（TLD）必须**以字母或汉字开头**（[a-z一-龥][a-z0-9一-龥-]*），
+// 否则纯数字末段会把 1.5 / 100.00 / 2024.1.1 这类小数误判成 URL（detectScalar 中 url
+// 判定排在 number/date 之前，会导致整数/小数数值列被整体推断为 url）。
 function looksLikeWebUrl(s) {
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(s)) {
     return /^https?:\/\//i.test(s) || /^ftp:\/\//i.test(s);
   }
   if (/^www\./i.test(s)) return true;
   if (/^\/\//.test(s)) return true; // 协议相对 //host/path
-  return /^(?:[a-z0-9一-龥-]+\.)+[a-z0-9一-龥-]+(?::\d{1,5})?(?:\/[^\s]*)?$/i.test(s);
+  // 末段要求 [a-z一-龥][a-z0-9一-龥-]*（字母/汉字开头），排除 1.5、100.00、2024.1.1 等小数；
+  // 保留 example.com、a.io、www.abc.com/path?q=1 等正常用例。
+  return /^(?:[a-z0-9一-龥-]+\.)+[a-z一-龥][a-z0-9一-龥-]*(?::\d{1,5})?(?:\/[^\s]*)?$/i.test(s);
 }
 
 export function isUrl(v) {
@@ -489,6 +551,14 @@ export function isPhone(v) {
 export function isDate(v) {
   const s = String(v).trim();
   if (s === "" || /^-?\d+$/.test(s)) return false;       // 纯数字交给 number
+  // 数字形态串（1.5 / 3.14 / 100.00 / 1.2.3 / -0.5 / +2.5 / .5 等）一律不是日期。
+  // 否则会被 parseFlexibleDateToMs 把 "." 替换成 "-" 后交给 Date.parse 解析成合法日期
+  // （V8 里 '1.5'→'1-5'→2001-05-01、'-0.5'→'-0-5' 亦为合法时间戳）而误判为 date——
+  // 这是 looksLikeWebUrl 修复后的连带缺陷，只修 url 不够：detectScalar('1.5') 会从 url 变成 date。
+  // 注意：必须覆盖「可选正负号 + 可选前导点」的形态，否则 -0.5 / -1.5 / .5 会绕过守卫
+  // （旧写法 ^\d+ 只匹配以数字开头的串）。
+  // 仅当点分串形如「4 位年份开头」的 YYYY.M.D / YYYY-M-D 时才放行给日期处理。
+  if (/^[-+]?\.?\d+(\.\d+)*$/.test(s) && !/^\d{4}[.\-]\d{1,2}[.\-]\d{1,2}$/.test(s)) return false;
   if (!/[-/年月.]/.test(s)) return false;
   return !isNaN(parseFlexibleDateToMs(s));
 }
@@ -610,6 +680,8 @@ export function buildCell(field, rawValue, isCSV = false) {
       return { ...base, text: { content: v } };
 
     case "number": {
+      // 写入规范与 normalizeNumberString（源侧 canonRawCell / 目标侧 canonValueCell）同源：
+      // 三者都归一到 String(Number(v))，避免 '007' / 7 / "7" 不一致导致整行去重漏匹配、二次导入重复。
       const empty = v === "";
       const n = empty ? 0 : Number(v);
       const ok = !empty && !isNaN(n);
