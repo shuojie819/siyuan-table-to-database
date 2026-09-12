@@ -14,5 +14,9 @@
     "vitest": "^5.0.0",
     "webpack": "^5.95.0",
     "webpack-cli": "^5.1.4"
+  },
+  "overrides": {
+    "fast-uri": "^3.1.7",
+    "serialize-javascript": "^7.0.6"
   }
 }
