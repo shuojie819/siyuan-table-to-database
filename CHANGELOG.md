@@ -1,5 +1,43 @@
 # Changelog
 
+## [1.3.3] - 2026-09-12
+
+### Fix: 发版阻断项 + 类型推断 / 分隔符 / 安全 / 性能共 8 组缺陷
+
+本轮来自一次独立二次审查（探针实测 + 代码白盒复核 + 集市规则源码核实）。其中 ① 为**发版阻断项**（不修则集市更新失败），②③ 会**静默写错数据**。
+
+**① 【发版阻断】`preview.png` 扩展名与真实格式不符**
+- **现象**：文件名是 `.png`，内容实为 JPEG（魔数 `ff d8 ff e0`，1692×899，201,184 字节）。该文件是 v1.3.0 替换预览图时引入的，当时只校验了体积、未校验格式。
+- **根因**：集市规则 `siyuan-note/bazaar` → `rules/images.go`（2026-08-31 引入、09-01 修订）按**扩展名**与**魔数**各算一次 MIME，不一致即报 Issue。规则晚于 v1.3.2 发版，故此前未被拦 —— 任意一次新版本发布都会 `stage-fail`，集市索引不再更新。
+- **修复**：转换为**真 PNG**（1280×680、RGB、464,894 字节，≤ 集市 512 KiB 上限）。
+- **附带澄清**：preview 体积上限已由旧口径的 200 KiB 放宽至 **512 KiB**；插件包必需文件仅 `README.md` + `plugin.json` + `index.js`，`icon.png` / `preview.png` / `index.css` 均非必需。
+
+**② number 列写入非有限值 → JSON `null`（写坏 AV 且破坏幂等）**
+- **现象**：`Infinity` / `NaN` / `1e999` 被判为 number；`buildCell` 写入 `content: Infinity`，经 JSON 序列化变成 `null`，而 `isNotEmpty` 仍为 `true`（单元格被写坏）；同时源侧与目标侧归一结果不对称，导致二次导入重复。
+- **修复**：`isNumber` / `buildCell` 改用 `Number.isFinite`；非有限值按空值处理（`isNotEmpty:false`、`content:0`）；`canonRawCell` 与 `canonValueCell` 对非法值统一归空，使源/目标行 key 严格对称。
+
+**③ 含逗号的列与带货币符号的小数被误判成 mSelect / date**
+- **现象**：`inferType(["1,000","2,000","3,000"])` 判为 `mSelect`（千分位金额被拆成 `1` / `000` 两个标签写入）；`detectScalar("$3.5")` 判为 `date`（价格列整列变日期字段）。
+- **根因**：`MSELECT_SEP_RE` 含逗号且 mSelect 判定早于标量推断；`isDate` 的守卫只覆盖「以符号/点/数字开头」的串，货币符号前缀可绕过。
+- **修复**：新增 `isExplicitNumber()`（识别标准千分位与可选货币符号包裹的十进制/科学计数）；`detectScalar` 在日期判定前优先返回 number；`inferType` 在 mSelect 判定前增加数值列守卫。真多选列（如 `["Hello, world","Hi, there"]`）判定不受影响。
+
+**④ CSV 分隔符探测不区分引号内外 → 整表塌成 1 列**
+- **现象**：`"Last, First";age` 这类首行含「引号内逗号」的分号 CSV 被判为逗号分隔，全表只剩 1 列且表头被当作数据吞掉。
+- **根因**：`detectDelimiter` 只对首行做朴素 `split` 计数，不区分引号内外，且平局时逗号先胜。
+- **修复**：重写为**引号感知**的逐字符计数（`""` 视为转义）+ **多行投票**（优先选择使各行列数一致的分隔符）。
+
+**⑤ 安全：完成提示未转义文档标题、预览链接无协议白名单**
+- **修复**：导入完成提示中的文档标题与异常消息统一 `escapeHtml`（思源的 `showMessage` 会按 HTML 解析，未转义时文档标题构成注入面）；新增 `safeHref()`，仅放行 `http` / `https` / `ftp`、协议相对的 `//` 以及裸域名（自动补 `https://`），其余（`javascript:` / `data:` / `vbscript:` 等）降级为纯文本渲染。
+
+**⑥ 性能：`listExistingAVs` 为显示名称而整表读取 AV**
+- **现象**：缺少可见标题的 AV 会调用 `readAV` 整表读取（包含对全部行×列计算 rowHashes），列出 M 个库时约 O(M×N×C) —— 大文档下打开导入向导明显卡顿。
+- **修复**：新增轻量 `readAVMeta()`（只读 `name`，不解析主列、不算 rowHashes）；`readAV` 增加 `needRowHashes` 选项（默认 `true`，保持向后兼容）。
+
+**⑦ 健壮性与工程细节**
+- `api()` / `putFile()` 的 `JSON.parse` 增加容错：响应非 JSON 时抛出带请求路径与响应片段（截断 200 字符）的明确错误，不再抛裸 `SyntaxError`。
+- `generateBlockId()` 补 7 位随机后缀（`YYYYMMDDHHmmss-xxxxxxx`），消除同一秒内重复调用产生相同块 ID 的可能。
+- 补齐 `i18n/zh_CN.json` 与 `i18n/en_US.json` 中缺失的 `defaultDBName` 键（此前英文环境默认数据库名仍为中文）。
+
 ## [1.3.2] - 2026-07-29
 
 ### Fix: 类型推断、去重归一与思源 API 错误语义的 8 处缺陷

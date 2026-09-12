@@ -91,6 +91,25 @@ async function resolvePrimaryByBlockInfo(unresolvedIndices, existingPrimary) {
   }
 }
 
+// 轻量读取 AV 元数据（仅 name / blockID）：只 getFile + JSON.parse，**不**解析主列、**不**算 rowHashes。
+// 供 listExistingAVs 取名使用，避免为拿 name 而整表遍历（文档有 M 个大库时 readAV 约为 O(M×N×C)，秒级卡顿）。
+// 读取/校验失败时抛错，由调用方捕获并回退。
+export async function readAVMeta(avID, blockID) {
+  const raw = await getFile(`/data/storage/av/${avID}.json`);
+  const text = fileContentToString(raw);
+  const json = JSON.parse(text);
+  if (!json || typeof json !== "object" || Array.isArray(json)) {
+    throw new Error((I18N.targetDbNotFound || "目标数据库不存在") + "：数据格式异常");
+  }
+  const kvs = Array.isArray(json.keyValues) ? json.keyValues : [];
+  const primary = kvs.find((kv) => kv && kv.key && kv.key.type === "block");
+  return {
+    avID,
+    blockID: blockID || (json.blockID || ""),
+    name: json.name || (primary && primary.key ? primary.key.name : avID),
+  };
+}
+
 // 枚举指定文档全部 NodeAttributeView 块，返回 { avID, blockID, name }[]
 // opts.protyle：显式指定要枚举的编辑区（多文档/分屏下避免错列到 .layout__wnd--active 指向的其它文档）。
 // opts.rootID：指定文档 rootID，据此定位对应 protyle（与导入锚点同文档）。
@@ -132,7 +151,8 @@ export async function listExistingAVs(opts = {}) {
     }
     if (!name) {
       try {
-        const av = await readAV(avID, blockID);
+        // 仅取元数据（name/blockID），不解析主列、不算 rowHashes，避免为取名而整表遍历（性能）。
+        const av = await readAVMeta(avID, blockID);
         if (av && av.name && av.name !== avID) name = av.name;
       } catch (_) {
         // 读不到也保留（可能正在被其它操作占用），稍后回退到 avID
@@ -152,7 +172,10 @@ export async function listExistingAVs(opts = {}) {
 // 读取单个已有 AV 的 schema、主列值、整行哈希
 // 抛错（目标库不存在 / 解析失败）由调用方捕获并提示
 // isCSV：透传自导入入口，决定 mSelect 是否按空格切分（与目标库 rowHashes 计算及源侧 canon 保持同一规则）
-export async function readAV(avID, blockID, isCSV = false) {
+// opts.needRowHashes（默认 true，向后兼容）：仅当需要整行去重时才计算 rowHashes；
+// listExistingAVs 取名等无关路径改用 readAVMeta，不再触发本函数的全量计算。返回结构保持不变。
+export async function readAV(avID, blockID, isCSV = false, opts = {}) {
+  const needRowHashes = !(opts && opts.needRowHashes === false);
   let json;
   try {
     // 注意：/api/file/getFile 返回的是文件原始内容（不是标准 {code,data} 信封），
@@ -242,13 +265,16 @@ export async function readAV(avID, blockID, isCSV = false) {
   const rowCount = kvs.length ? (kvs[0].values || []).length : 0;
 
   // 尽力推算整行哈希（R1：若 av JSON 的 values 为空，则 rowHashes 为空，
-  // 「整行去重」将退化为「不基于存量去重」，属安全降级）
+  // 「整行去重」将退化为「不基于存量去重」，属安全降级）。
+  // 仅当 needRowHashes 为 true 时才计算（listExistingAVs 取名等无关路径不再触发 O(N×C) 全表计算）。
   const rowHashes = [];
-  for (let k = 0; k < rowCount; k++) {
-    // 把该列的 keyOptions 一并传入，供 canonValueCell 在 mSelect/select 单元格
-    // 仅存 id 引用时反查真实文本（修复「备注=多选」整行去重误判新增）。
-    const parts = kvs.map((kv) => cellText(kv.values ? kv.values[k] : null, kv.key.type, kv.key.options || [], isCSV));
-    rowHashes.push(parts.join("\u0001"));
+  if (needRowHashes) {
+    for (let k = 0; k < rowCount; k++) {
+      // 把该列的 keyOptions 一并传入，供 canonValueCell 在 mSelect/select 单元格
+      // 仅存 id 引用时反查真实文本（修复「备注=多选」整行去重误判新增）。
+      const parts = kvs.map((kv) => cellText(kv.values ? kv.values[k] : null, kv.key.type, kv.key.options || [], isCSV));
+      rowHashes.push(parts.join("\u0001"));
+    }
   }
 
   return {

@@ -33,14 +33,20 @@ export const MSELECT_SPLIT_RE = /[,，;；|、\s]+/;
 
 // ---------- 基础工具 ----------
 
-// 思源块 ID：14 位时间戳（YYYYMMddHHmmss）
+// 思源块 ID：YYYYMMDDHHmmss-{7位随机小写字母数字}（与 generateId 的 -xxxxxxx 约定一致，共 22 位）。
+// 旧实现为 14 位纯秒级时间戳，同一秒内多次调用会碰撞；改为追加随机后缀，显著降低碰撞概率。
+// getTimestamp() 复用本函数，其值仅供 DOM 的 updated 属性使用（字符串，无格式要求），追加后缀对其无影响。
 export function generateBlockId() {
   const now = new Date();
   const pad = (n) => String(n).padStart(2, "0");
-  return [
+  const ts = [
     now.getFullYear(), pad(now.getMonth() + 1), pad(now.getDate()),
     pad(now.getHours()), pad(now.getMinutes()), pad(now.getSeconds()),
   ].join("");
+  const CHARS = "abcdefghijklmnopqrstuvwxyz0123456789";
+  let rand = "";
+  for (let i = 0; i < 7; i++) rand += CHARS[Math.floor(Math.random() * CHARS.length)];
+  return `${ts}-${rand}`;
 }
 
 // AV/Key/View/Table ID：timestamp-7random，符合思源 AV ID 约定
@@ -65,6 +71,27 @@ export function escapeHtml(s = "") {
   return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
+// 构造可安全用于 <a href> 的 URL：做协议白名单 + 裸域名补协议，避免伪协议注入。
+// escapeHtml 只能挡 HTML 特殊字符，挡不住 javascript: / data: / vbscript: 等伪协议，故 href 必须白名单化。
+// 判定顺序：
+//   1) 空串 → null；
+//   2) http/https/ftp 协议 → 原样返回；
+//   3) 协议相对（//）→ 原样返回；
+//   4) 裸域名形态（label.label…，可选 :端口 与 /路径）→ 补 "https://" 后返回（保留可点体验，仍安全）；
+//   5) 其余一律 null，调用方据此降级为纯文本（不渲染 <a>）。
+// 注意：第 4 条的裸域名只允许「.」分隔各标签、以及「:端口」式的冒号（: 后必须紧跟 1-5 位数字），
+// 因此 "javascript:alert(1)" / "mailto:a@b.com" / "data:text/html,x" 等含 : 或 @ 的伪协议不会落入第 4 条。
+export function safeHref(raw) {
+  const s = String(raw == null ? "" : raw).trim();
+  if (s === "") return null;
+  if (/^(https?|ftp):\/\//i.test(s)) return s;
+  if (/^\/\//.test(s)) return s; // 协议相对 //host/path
+  if (/^[a-z0-9\u4e00-\u9fff-]+(\.[a-z0-9\u4e00-\u9fff-]+)+(:\d{1,5})?(\/[^\s]*)?$/i.test(s)) {
+    return "https://" + s;
+  }
+  return null;
+}
+
 export function typeLabel(t) {
   const key = `type${t.charAt(0).toUpperCase()}${t.slice(1)}`;
   return (I18N[key] || t);
@@ -81,7 +108,13 @@ export async function api(path, data) {
   if (!resp.ok) throw new Error(`API ${path} 请求失败 [${resp.status}]: ${resp.statusText}`);
   const text = await resp.text();
   if (!text) return null;
-  const json = JSON.parse(text);
+  let json;
+  try {
+    json = JSON.parse(text);
+  } catch (_) {
+    // 解析失败时抛出带 path 与响应片段（截断 200 字符）的明确错误，而非裸 SyntaxError，便于定位问题接口。
+    throw new Error(`API ${path} 返回非 JSON 响应：${text.slice(0, 200)}`);
+  }
   if (json.code !== 0) throw new Error(`API ${path} 失败 [${json.code}]: ${json.msg}`);
   return json.data;
 }
@@ -96,7 +129,13 @@ export async function putFile(path, content) {
   if (!resp.ok) throw new Error(`putFile 请求失败 [${resp.status}]: ${resp.statusText}`);
   const text = await resp.text();
   if (!text) return null;
-  const json = JSON.parse(text);
+  let json;
+  try {
+    json = JSON.parse(text);
+  } catch (_) {
+    // 解析失败时抛出带 path 与响应片段（截断 200 字符）的明确错误，而非裸 SyntaxError。
+    throw new Error(`putFile ${path} 返回非 JSON 响应：${text.slice(0, 200)}`);
+  }
   if (json.code !== 0) throw new Error(`putFile 失败 [${json.code}]: ${json.msg}`);
   return json.data;
 }
@@ -318,9 +357,10 @@ export function canonRawCell(raw, type, isCSV = false) {
       return formatDateCanonical(ms);
     }
     case "number":
-      // 与 canonValueCell(number) 及 buildCell(number) 共用同一数值规范（normalizeNumberString），
-      // 保证「源 row key」与「目标 row key」对数值列严格一致，消除二次导入重复插入。
-      return normalizeNumberString(raw);
+      // 非有限值（Infinity/NaN/1e999/"abc" 等）视为空，与 buildCell(number) 写入的空值、
+      // canonValueCell(number) 读回的空值对齐，保证「源 row key」与「目标 row key」对非法数值列严格一致，
+      // 消除二次导入重复；其余走 normalizeNumberString 归一为 String(Number(raw))。
+      return Number.isFinite(Number(raw)) ? normalizeNumberString(raw) : "";
     case "block":
     case "text":
     case "url":
@@ -424,7 +464,11 @@ export function canonValueCell(v, type, options, isCSV = false) {
     case "number":
       // 与 canonRawCell(number) 共用同一数值规范（normalizeNumberString），
       // 使目标侧读取（如 content: 7 → "7"）与源侧（如 '007' → "7"）严格一致。
-      return (v.number && v.number.content != null) ? normalizeNumberString(v.number.content) : "";
+      // 关键：isNotEmpty 显式为 false（空值 / 源侧曾是非有限值）时一律视为空串，与源侧对齐，
+      // 避免不对称导致重复导入。此处用 `!== false` 而非真值判断：兼容仅含 content 的历史/最小结构。
+      return (v.number && v.number.isNotEmpty !== false && v.number.content != null)
+        ? normalizeNumberString(v.number.content)
+        : "";
     case "url":
       return (v.url && v.url.content != null) ? String(v.url.content).trim() : "";
     case "email":
@@ -565,13 +609,34 @@ export function isDate(v) {
 
 export function isNumber(v) {
   const s = String(v).trim();
-  return s !== "" && !isNaN(Number(v));
+  // 用 Number.isFinite 而非 !isNaN：Infinity / -Infinity / NaN 均非「有效数值」，
+  // 避免把 "Infinity" 之类的非有限串判为 number（否则写库 content 会变成 null）。
+  return s !== "" && Number.isFinite(Number(v));
+}
+
+// 明确数值形态判定：用于修正「含千分位逗号的金额列被误判 mSelect」「带货币符号的小数被误判 date」。
+// 规则（先去掉首尾货币符号 ¥ $ € £ 与空白）：
+//   - 标准千分位：/^-?\d{1,3}(,\d{3})+(\.\d+)?$/ → 去逗号后 Number.isFinite；
+//   - 普通十进制 / 科学计数：/^-?\d+(\.\d+)?([eE][-+]?\d+)?$/ → Number.isFinite；
+//   - 其它 → false。
+// 注意："1,2,3"（逗号分隔但非标准千分位）不匹配任一形态 → 保持非数值（仍可判 mSelect）。
+export function isExplicitNumber(v) {
+  let s = String(v == null ? "" : v).trim();
+  if (s === "") return false;
+  s = s.replace(/^[¥$€£\s]+/, "").replace(/[¥$€£\s]+$/, "");
+  if (s === "") return false;
+  if (/^-?\d{1,3}(,\d{3})+(\.\d+)?$/.test(s)) return Number.isFinite(Number(s.replace(/,/g, "")));
+  if (/^-?\d+(\.\d+)?([eE][-+]?\d+)?$/.test(s)) return Number.isFinite(Number(s));
+  return false;
 }
 
 export function detectScalar(v) {
   if (isEmail(v)) return "email";
   if (isUrl(v)) return "url";
   if (isPhone(v)) return "phone";
+  // 显式数值形态（含千分位 / 货币符号）优先于日期：$3.5 / 1,000 应判 number，
+  // 且必须早于 isDate（否则 $3.5 会被日期解析截胡）；置于 isPhone 之后，避免误伤 11 位电话号。
+  if (isExplicitNumber(v)) return "number";
   if (isDate(v)) return "date";
   if (isNumber(v)) return "number";
   return "text";
@@ -601,6 +666,12 @@ export function inferType(values) {
 
   const checkboxTokens = ["✓", "✔", "☑", "x", "✗", "✘", "☐", "false", "true", "是", "否", "yes", "no", "y", "n", "1", "0"];
   if (nonEmpty.every((v) => checkboxTokens.includes(String(v).toLowerCase().trim()))) return "checkbox";
+
+  // 明确数值形态列（如千分位金额 "1,000" / 货币小数 "$3.5"）：非空值中满足 isExplicitNumber 的比例
+  // ≥ 0.8 且数量 ≥ 2 → number。必须早于 looksLikeMSelect，避免千分位逗号被当作 mSelect 分隔符而误判多选
+  // （"Hello, world" 这类非数值文本不满足 → 仍由 looksLikeMSelect 判 mSelect，不被误伤）。
+  const explicitNumCount = nonEmpty.filter((v) => isExplicitNumber(v)).length;
+  if (explicitNumCount >= 2 && explicitNumCount / nonEmpty.length >= 0.8) return "number";
 
   // 多选：含逗号/分号/竖线/顿号等分隔符
   if (looksLikeMSelect(nonEmpty)) return "mSelect";
@@ -680,15 +751,18 @@ export function buildCell(field, rawValue, isCSV = false) {
       return { ...base, text: { content: v } };
 
     case "number": {
-      // 写入规范与 normalizeNumberString（源侧 canonRawCell / 目标侧 canonValueCell）同源：
-      // 三者都归一到 String(Number(v))，避免 '007' / 7 / "7" 不一致导致整行去重漏匹配、二次导入重复。
+      // 写入规范与 normalizeNumberString（源侧 canonRawCell / 目标侧 canonValueCell）同源。
+      // 关键：非有限值（Infinity / -Infinity / NaN，如 "Infinity"/"abc"/"1e999"）必须视为「空」——
+      // content 归 0、isNotEmpty:false；否则 JSON.stringify(Infinity) 会写成 null 且 isNotEmpty 仍为 true，
+      // 使 AV 单元格被写坏，且回读端（canonValueCell 读 content:null → ""）与源端（canonRawCell 得原始串）
+      // 不对称，导致二次导入重复。非法值必须让 isNotEmpty:false 才能与源端对齐。
       const empty = v === "";
-      const n = empty ? 0 : Number(v);
-      const ok = !empty && !isNaN(n);
+      const n = Number(v);
+      const ok = !empty && Number.isFinite(n);
       return {
         ...base,
         number: {
-          content: isNaN(n) ? 0 : n,
+          content: ok ? n : 0,
           isNotEmpty: ok,
           format: "",
           formattedContent: ok ? String(n) : "",

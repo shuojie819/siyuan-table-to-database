@@ -15,6 +15,7 @@
   "noBlockId": "Cannot get the table block ID",
   "noTableEl": "<table> element not found in the table block",
   "emptyTable": "Table is empty or cannot be parsed",
+  "defaultDBName": "Table to Database",
   "onlyOneCol": "The table has only one column; it will be used directly as the database primary column (no other fields)",
   "panelTitle": "Select Field Types",
   "panelFieldTypes": "Column Type Mapping",

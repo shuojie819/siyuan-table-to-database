@@ -15,6 +15,7 @@
   "noBlockId": "无法获取表格块 ID",
   "noTableEl": "未在表格块中找到 <table> 元素",
   "emptyTable": "表格为空或无法解析",
+  "defaultDBName": "表格转数据库",
   "onlyOneCol": "表格只有一列，将直接作为数据库主列（无其它字段）",
   "panelTitle": "选择字段类型",
   "panelFieldTypes": "列类型映射",

@@ -9,7 +9,7 @@
 import { Dialog, showMessage } from "siyuan";
 import {
   I18N, FIELD_TYPES, typeLabel, escapeHtml, parseFlexibleDateToMs,
-  getCurrentBlockId, getBlockInfo, tokenizeMselect,
+  getCurrentBlockId, getBlockInfo, tokenizeMselect, safeHref,
   captureCurrentAnchor, buildRowKey,
 } from "../common";
 import { parseCsv, parseMarkdown, reapplyHeader } from "./parsers";
@@ -420,8 +420,14 @@ export class ImportWizard {
         const txt = isNaN(ms) ? s : new Date(ms).toLocaleDateString();
         return `<span class="b3-chip b3-chip--primary">${escapeHtml(txt)}</span>`;
       }
-      case "url":
-        return s ? `<a href="${escapeHtml(s)}" target="_blank" rel="noopener">${escapeHtml(s)}</a>` : "";
+      case "url": {
+        if (!s) return "";
+        // 仅允许白名单协议（http/https/ftp 或协议相对）；否则降级为纯文本，避免 javascript: 等伪协议注入。
+        const href = safeHref(s);
+        return href
+          ? `<a href="${escapeHtml(href)}" target="_blank" rel="noopener">${escapeHtml(s)}</a>`
+          : escapeHtml(s);
+      }
       default:
         // 文本/数字等普通类型不再 chip 化，直接显示为普通文本（撤销上版过度 chip 化）
         return s ? escapeHtml(s) : "";
@@ -805,7 +811,8 @@ export class ImportWizard {
       rootID = (info && info.rootID) ? info.rootID : "";
       if (rootID && rootID !== blockID) {
         const rootInfo = await getBlockInfo(rootID);
-        docTitle = (rootInfo && rootInfo.name) ? rootInfo.name : "";
+        // 文档标题来自用户内容，showMessage 会按 HTML 解析；必须先转义再拼接，避免注入。
+        docTitle = (rootInfo && rootInfo.name) ? escapeHtml(rootInfo.name) : "";
       }
     } catch (_) { /* 忽略定位失败 */ }
 

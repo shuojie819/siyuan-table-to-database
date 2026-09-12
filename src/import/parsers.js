@@ -20,16 +20,45 @@ export function stripBOM(text) {
   return text;
 }
 
-// 自动探测分隔符：取首行中出现次数最多的候选符（逗号 / 制表符 / 分号）
+// 引号感知地统计一行按 delim 切分后的「列数」：忽略成对双引号之间的分隔符，"" 视为转义引号。
+// 旧实现对整行朴素 split，会把引号内的分隔符也算进去，导致带引号的表头被切错列。
+function countQuoteAwareColumns(line, delim) {
+  let cols = 1;
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (c === '"') {
+      if (inQuotes && line[i + 1] === '"') { i++; continue; } // "" → 转义引号，不切换引号状态
+      inQuotes = !inQuotes;
+      continue;
+    }
+    if (!inQuotes && c === delim) cols++;
+  }
+  return cols;
+}
+
+// 自动探测分隔符：取前若干非空行（最多 10 行）为样本，按「引号感知」方式计数，
+// 以「各行列数一致的行数」优先、其次「列数多者」优先选择（候选顺序 , / \t / ; 保证平局时逗号优先）。
+// 若所有候选都没让首行产生 ≥2 列，保留回退行为（默认逗号）。
 export function detectDelimiter(text) {
-  const firstLine = (text.split(/\r?\n/)[0] || "");
   const candidates = [",", "\t", ";"];
+  const lines = String(text == null ? "" : text)
+    .split(/\r?\n/)
+    .filter((l) => l.trim() !== "")
+    .slice(0, 10);
+  if (lines.length === 0) return ",";
+
   let best = ",";
-  let bestCount = -1;
+  let bestConsistent = -1; // 「列数与首行一致」的行数
+  let bestCols = 1;        // 首行切出的列数
   for (const d of candidates) {
-    const count = firstLine.split(d).length - 1;
-    if (count > bestCount) {
-      bestCount = count;
+    const colCounts = lines.map((l) => countQuoteAwareColumns(l, d));
+    const firstCols = colCounts[0];
+    if (firstCols < 2) continue; // 首行切不出 ≥2 列 → 该候选无效
+    const consistent = colCounts.filter((c) => c === firstCols).length;
+    if (consistent > bestConsistent || (consistent === bestConsistent && firstCols > bestCols)) {
+      bestConsistent = consistent;
+      bestCols = firstCols;
       best = d;
     }
   }

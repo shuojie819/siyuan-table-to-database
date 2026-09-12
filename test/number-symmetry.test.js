@@ -5,7 +5,7 @@
  * ============================================================ */
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { canonRawCell, canonValueCell, buildRowKey } from "../src/common.js";
+import { canonRawCell, canonValueCell, buildCell, buildRowKey } from "../src/common.js";
 import { readAV } from "../src/import/targetDb.js";
 
 // 最小 fetch Response 替身（只用到 .ok/.status/.statusText/.text）
@@ -33,8 +33,11 @@ describe("③ number 源侧 / 目标侧归一完全对称（修复前 '007' ≠ 
     expect(canonRawCell("0", "number")).toBe("0");
   });
 
-  it("无法解析为有限数的文本退化为去空白原文（不与目标侧冲突）", () => {
-    expect(canonRawCell("nope", "number")).toBe("nope");
+  it("无法解析为有限数的文本两侧均归空，保证源/目标行 key 对称", () => {
+    // v1.3.3 起：number 列非有限值（"Infinity"/"NaN"/"1e999"/"abc" 等）在源侧(canonRawCell)
+    // 与目标侧(canonValueCell 读 buildCell 写出的空值)统一归空串，两侧对称。
+    expect(canonRawCell("nope", "number")).toBe("");
+    expect(canonValueCell(buildCell({ keyID: "k", type: "number" }, "nope"), "number")).toBe("");
   });
 });
 

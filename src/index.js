@@ -15,7 +15,7 @@ import {
   generateId, generateBlockId, getTimestamp, escapeHtml, typeLabel,
   inferType, buildSelectOptions, buildMSelectOptions,
   getBlockInfo, createDocHistory, removeBlock, api,
-  buildCell, buildAVJson, FIELD_TYPES, MSELECT_SEP_RE, MSELECT_SPLIT_RE, tokenizeMselect,
+  buildCell, buildAVJson, FIELD_TYPES, MSELECT_SEP_RE, MSELECT_SPLIT_RE, tokenizeMselect, safeHref,
   captureCurrentAnchor, setLastFocusedProtyle, refreshAnchorBlockFromSelection,
 } from "./common";
 import { openImportWizard } from "./import/ImportWizard";
@@ -125,7 +125,11 @@ function openFieldTypePanel(tableBlock) {
           return `<span class="b3-chip b3-chip--primary">${escapeHtml(v)}</span>`;
         }
         if (sel === "url") {
-          return `<a href="${escapeHtml(v)}" target="_blank" rel="noopener noreferrer" style="color:var(--b3-theme-primary,#4285f4);text-decoration:underline">${escapeHtml(v)}</a>`;
+          // 仅允许白名单协议（http/https/ftp 或协议相对）；否则降级为纯文本，避免 javascript: 等伪协议注入。
+          const href = safeHref(v);
+          return href
+            ? `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer" style="color:var(--b3-theme-primary,#4285f4);text-decoration:underline">${escapeHtml(v)}</a>`
+            : escapeHtml(v);
         }
         if (sel === "date") {
           return `<span class="b3-chip b3-chip--primary">${escapeHtml(v)}</span>`;
@@ -475,7 +479,8 @@ async function convertFocused() {
     showMessage(buildDoneMessage(res));
   } catch (e) {
     console.error("[table-to-database]", e);
-    showMessage((I18N.convertFail || "转换失败：") + (e && e.message ? e.message : e));
+    // 错误信息可能含用户内容/HTML，showMessage 按 HTML 解析；先转义再拼接，避免注入。
+    showMessage((I18N.convertFail || "转换失败：") + escapeHtml(e && e.message ? e.message : e));
   }
 }
 
