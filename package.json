@@ -16,7 +16,7 @@
     "webpack-cli": "^5.1.4"
   },
   "overrides": {
-    "fast-uri": "^3.1.7",
+    "fast-uri": "^3.1.9",
     "serialize-javascript": "^7.0.6"
   }
 }
